@@ -1,10 +1,14 @@
 ﻿using System;
-using System.Collections.Generic;
-using System.Linq;
+using System.IO;
 using System.Windows.Forms;
+using Automatic_Storage.Services;
 
 namespace Automatic_Storage
 {
+
+    /// <summary>
+    /// 應用程式的主要類別，負責啟動 Windows Forms 應用程式。
+    /// </summary>
     static class Program
     {
         /// <summary>
@@ -13,9 +17,27 @@ namespace Automatic_Storage
         [STAThread]
         static void Main()
         {
+            /// <summary>
+            /// 啟用視覺化樣式，使應用程式的控制項符合目前 Windows 主題。
+            /// </summary>
             Application.EnableVisualStyles();
+
+            /// <summary>
+            /// 設定應用程式使用預設的文字轉譯方式，提升文字顯示品質。
+            /// </summary>
             Application.SetCompatibleTextRenderingDefault(false);
+
+            /// <summary>
+            /// 啟動主視窗 Form1，進入應用程式主循環。
+            /// </summary>
             Application.Run(new Form1());
+
+            // 應用程式主循環結束後，嘗試優雅釋放 ExcelWriteQueue singleton
+            try
+            {
+                try { Automatic_Storage.Utilities.ExcelWriteQueue.Instance.Dispose(); } catch { }
+            }
+            catch { }
         }
     }
 }

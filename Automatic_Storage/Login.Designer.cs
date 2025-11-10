@@ -55,7 +55,7 @@ namespace Automatic_Storage
             this.label2.Size = new System.Drawing.Size(65, 12);
             this.label2.TabIndex = 1;
             this.label2.Text = "使用者密碼";
-            this.label2.Click += new System.EventHandler(this.label2_Click);
+            //this.label2.Click += new System.EventHandler(this.label2_Click);
             // 
             // txt_id
             // 
@@ -84,7 +84,7 @@ namespace Automatic_Storage
             this.loginresult.Name = "loginresult";
             this.loginresult.Size = new System.Drawing.Size(0, 20);
             this.loginresult.TabIndex = 1;
-            this.loginresult.Click += new System.EventHandler(this.label2_Click);
+            //this.loginresult.Click += new System.EventHandler(this.label2_Click);
             // 
             // button1
             // 

@@ -1,4 +1,4 @@
-﻿
+
 namespace Automatic_Storage
 {
     partial class Form1
@@ -35,6 +35,7 @@ namespace Automatic_Storage
             this.btn_Out = new System.Windows.Forms.Button();
             this.btn_BatIn = new System.Windows.Forms.Button();
             this.btn_BatOut = new System.Windows.Forms.Button();
+            this.btn備料單匯入 = new System.Windows.Forms.Button();
             this.panel1 = new System.Windows.Forms.Panel();
             this.txt_result = new System.Windows.Forms.TextBox();
             this.selectButton = new System.Windows.Forms.Button();
@@ -87,6 +88,7 @@ namespace Automatic_Storage
             this.panel_rad = new System.Windows.Forms.Panel();
             this.btnNextPage = new System.Windows.Forms.Button();
             this.btnPreviousPage = new System.Windows.Forms.Button();
+            this.lblPageInfo = new System.Windows.Forms.Label();
             ((System.ComponentModel.ISupportInitialize)(this.dataGridView1)).BeginInit();
             this.panel1.SuspendLayout();
             this.panel2.SuspendLayout();
@@ -109,7 +111,7 @@ namespace Automatic_Storage
             this.dataGridView1.Name = "dataGridView1";
             this.dataGridView1.ReadOnly = true;
             this.dataGridView1.RowTemplate.Height = 24;
-            this.dataGridView1.Size = new System.Drawing.Size(776, 351);
+            this.dataGridView1.Size = new System.Drawing.Size(776, 386);
             this.dataGridView1.TabIndex = 0;
             this.dataGridView1.CellFormatting += new System.Windows.Forms.DataGridViewCellFormattingEventHandler(this.dataGridView1_CellFormatting);
             this.dataGridView1.DataBindingComplete += new System.Windows.Forms.DataGridViewBindingCompleteEventHandler(this.dataGridView1_DataBindingComplete);
@@ -118,10 +120,10 @@ namespace Automatic_Storage
             // btn_Input
             // 
             this.btn_Input.BackColor = System.Drawing.SystemColors.ActiveCaption;
-            this.btn_Input.Font = new System.Drawing.Font("微軟正黑體", 12F, System.Drawing.FontStyle.Bold, System.Drawing.GraphicsUnit.Point, ((byte)(136)));
-            this.btn_Input.Location = new System.Drawing.Point(3, 7);
+            this.btn_Input.Font = new System.Drawing.Font("微軟正黑體", 14F, System.Drawing.FontStyle.Bold, System.Drawing.GraphicsUnit.Point, ((byte)(136)));
+            this.btn_Input.Location = new System.Drawing.Point(10, 8);
             this.btn_Input.Name = "btn_Input";
-            this.btn_Input.Size = new System.Drawing.Size(89, 37);
+            this.btn_Input.Size = new System.Drawing.Size(140, 40);
             this.btn_Input.TabIndex = 1;
             this.btn_Input.Text = "入庫登記";
             this.btn_Input.UseVisualStyleBackColor = false;
@@ -130,11 +132,12 @@ namespace Automatic_Storage
             // btn_Out
             // 
             this.btn_Out.BackColor = System.Drawing.Color.MistyRose;
-            this.btn_Out.Font = new System.Drawing.Font("微軟正黑體", 12F, System.Drawing.FontStyle.Bold);
-            this.btn_Out.Location = new System.Drawing.Point(225, 7);
+            this.btn_Out.Font = new System.Drawing.Font("微軟正黑體", 14F, System.Drawing.FontStyle.Bold);
+            this.btn_Out.Location = new System.Drawing.Point(170, 8);
             this.btn_Out.Name = "btn_Out";
-            this.btn_Out.Size = new System.Drawing.Size(87, 37);
-            this.btn_Out.TabIndex = 2;
+            this.btn_Out.Size = new System.Drawing.Size(140, 40);
+                // 註冊備料單匯入按鈕的 Click 事件
+                this.btn備料單匯入.Click += new System.EventHandler(this.btn備料單匯入_Click);
             this.btn_Out.Text = "出庫登記";
             this.btn_Out.UseVisualStyleBackColor = false;
             this.btn_Out.Click += new System.EventHandler(this.button2_Click);
@@ -142,10 +145,10 @@ namespace Automatic_Storage
             // btn_BatIn
             // 
             this.btn_BatIn.BackColor = System.Drawing.Color.Gold;
-            this.btn_BatIn.Font = new System.Drawing.Font("微軟正黑體", 12F, System.Drawing.FontStyle.Bold);
-            this.btn_BatIn.Location = new System.Drawing.Point(454, 7);
+            this.btn_BatIn.Font = new System.Drawing.Font("微軟正黑體", 14F, System.Drawing.FontStyle.Bold);
+            this.btn_BatIn.Location = new System.Drawing.Point(330, 8);
             this.btn_BatIn.Name = "btn_BatIn";
-            this.btn_BatIn.Size = new System.Drawing.Size(89, 37);
+            this.btn_BatIn.Size = new System.Drawing.Size(140, 40);
             this.btn_BatIn.TabIndex = 3;
             this.btn_BatIn.Text = "批次入庫";
             this.btn_BatIn.UseVisualStyleBackColor = false;
@@ -154,14 +157,26 @@ namespace Automatic_Storage
             // btn_BatOut
             // 
             this.btn_BatOut.BackColor = System.Drawing.Color.Teal;
-            this.btn_BatOut.Font = new System.Drawing.Font("微軟正黑體", 12F, System.Drawing.FontStyle.Bold);
-            this.btn_BatOut.Location = new System.Drawing.Point(681, 7);
+            this.btn_BatOut.Font = new System.Drawing.Font("微軟正黑體", 14F, System.Drawing.FontStyle.Bold);
+            this.btn_BatOut.Location = new System.Drawing.Point(620, 8);
             this.btn_BatOut.Name = "btn_BatOut";
-            this.btn_BatOut.Size = new System.Drawing.Size(89, 37);
+            this.btn_BatOut.Size = new System.Drawing.Size(120, 40);
             this.btn_BatOut.TabIndex = 4;
             this.btn_BatOut.Text = "批次出庫";
             this.btn_BatOut.UseVisualStyleBackColor = false;
             this.btn_BatOut.Click += new System.EventHandler(this.button4_Click);
+            // 
+            // btn備料單匯入
+            // 
+            this.btn備料單匯入.BackColor = System.Drawing.Color.LightGray;
+            this.btn備料單匯入.FlatStyle = System.Windows.Forms.FlatStyle.Flat;
+            this.btn備料單匯入.Font = new System.Drawing.Font("微軟正黑體", 11F, System.Drawing.FontStyle.Bold);
+            this.btn備料單匯入.Location = new System.Drawing.Point(490, 8);
+            this.btn備料單匯入.Name = "btn備料單匯入";
+            this.btn備料單匯入.Size = new System.Drawing.Size(110, 40);
+            this.btn備料單匯入.TabIndex = 5;
+            this.btn備料單匯入.Text = "備料單匯入";
+            this.btn備料單匯入.UseVisualStyleBackColor = false;
             // 
             // panel1
             // 
@@ -172,7 +187,7 @@ namespace Automatic_Storage
             this.panel1.Controls.Add(this.btn_return);
             this.panel1.Controls.Add(this.commitButton);
             this.panel1.Controls.Add(this.txt_path);
-            this.panel1.Location = new System.Drawing.Point(18, 57);
+            this.panel1.Location = new System.Drawing.Point(18, 59);
             this.panel1.Name = "panel1";
             this.panel1.Size = new System.Drawing.Size(677, 70);
             this.panel1.TabIndex = 5;
@@ -259,9 +274,9 @@ namespace Automatic_Storage
             this.panel2.Controls.Add(this.txt_position);
             this.panel2.Controls.Add(this.label1);
             this.panel2.Controls.Add(this.txt_item);
-            this.panel2.Location = new System.Drawing.Point(65, 57);
+            this.panel2.Location = new System.Drawing.Point(65, 60);
             this.panel2.Name = "panel2";
-            this.panel2.Size = new System.Drawing.Size(627, 70);
+            this.panel2.Size = new System.Drawing.Size(627, 69);
             this.panel2.TabIndex = 6;
             // 
             // rad_out
@@ -425,20 +440,21 @@ namespace Automatic_Storage
             // panel3
             // 
             this.panel3.BorderStyle = System.Windows.Forms.BorderStyle.Fixed3D;
+            this.panel3.Controls.Add(this.btn備料單匯入);
             this.panel3.Controls.Add(this.btn_Input);
             this.panel3.Controls.Add(this.btn_Out);
             this.panel3.Controls.Add(this.btn_BatIn);
             this.panel3.Controls.Add(this.btn_BatOut);
             this.panel3.Location = new System.Drawing.Point(12, 1);
             this.panel3.Name = "panel3";
-            this.panel3.Size = new System.Drawing.Size(776, 52);
+            this.panel3.Size = new System.Drawing.Size(776, 53);
             this.panel3.TabIndex = 7;
             // 
             // panel4
             // 
             this.panel4.Controls.Add(this.btn_history);
             this.panel4.Controls.Add(this.btn_Maintain);
-            this.panel4.Location = new System.Drawing.Point(695, 56);
+            this.panel4.Location = new System.Drawing.Point(695, 60);
             this.panel4.Name = "panel4";
             this.panel4.Size = new System.Drawing.Size(93, 70);
             this.panel4.TabIndex = 8;
@@ -491,9 +507,9 @@ namespace Automatic_Storage
             this.panel5.Controls.Add(this.txt_siteP5);
             this.panel5.Controls.Add(this.label4);
             this.panel5.Controls.Add(this.txt_itemP5);
-            this.panel5.Location = new System.Drawing.Point(65, 57);
+            this.panel5.Location = new System.Drawing.Point(65, 59);
             this.panel5.Name = "panel5";
-            this.panel5.Size = new System.Drawing.Size(627, 70);
+            this.panel5.Size = new System.Drawing.Size(627, 71);
             this.panel5.TabIndex = 9;
             // 
             // label8
@@ -625,7 +641,7 @@ namespace Automatic_Storage
             // 
             this.panel6.Controls.Add(this.txt_sumC);
             this.panel6.Controls.Add(this.label5);
-            this.panel6.Location = new System.Drawing.Point(255, 486);
+            this.panel6.Location = new System.Drawing.Point(255, 518);
             this.panel6.Name = "panel6";
             this.panel6.Size = new System.Drawing.Size(162, 35);
             this.panel6.TabIndex = 11;
@@ -633,7 +649,7 @@ namespace Automatic_Storage
             // txt_sumC
             // 
             this.txt_sumC.Font = new System.Drawing.Font("微軟正黑體", 9.75F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(136)));
-            this.txt_sumC.Location = new System.Drawing.Point(62, 3);
+            this.txt_sumC.Location = new System.Drawing.Point(62, 5);
             this.txt_sumC.Name = "txt_sumC";
             this.txt_sumC.ReadOnly = true;
             this.txt_sumC.Size = new System.Drawing.Size(72, 25);
@@ -681,7 +697,7 @@ namespace Automatic_Storage
             // 
             // btnNextPage
             // 
-            this.btnNextPage.Location = new System.Drawing.Point(695, 459);
+            this.btnNextPage.Location = new System.Drawing.Point(695, 521);
             this.btnNextPage.Name = "btnNextPage";
             this.btnNextPage.Size = new System.Drawing.Size(75, 23);
             this.btnNextPage.TabIndex = 15;
@@ -692,7 +708,7 @@ namespace Automatic_Storage
             // 
             // btnPreviousPage
             // 
-            this.btnPreviousPage.Location = new System.Drawing.Point(31, 459);
+            this.btnPreviousPage.Location = new System.Drawing.Point(31, 522);
             this.btnPreviousPage.Name = "btnPreviousPage";
             this.btnPreviousPage.Size = new System.Drawing.Size(75, 23);
             this.btnPreviousPage.TabIndex = 15;
@@ -701,12 +717,23 @@ namespace Automatic_Storage
             this.btnPreviousPage.Visible = false;
             this.btnPreviousPage.Click += new System.EventHandler(this.btnPreviousPage_Click);
             // 
+            // lblPageInfo
+            // 
+            this.lblPageInfo.AutoSize = true;
+            this.lblPageInfo.Font = new System.Drawing.Font("新細明體", 9.75F);
+            this.lblPageInfo.Location = new System.Drawing.Point(425, 530);
+            this.lblPageInfo.Name = "lblPageInfo";
+            this.lblPageInfo.Size = new System.Drawing.Size(33, 13);
+            this.lblPageInfo.TabIndex = 16;
+            this.lblPageInfo.Text = "頁數";
+            // 
             // Form1
             // 
             this.AutoScaleDimensions = new System.Drawing.SizeF(96F, 96F);
             this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Dpi;
             this.BackColor = System.Drawing.Color.White;
-            this.ClientSize = new System.Drawing.Size(800, 515);
+            this.ClientSize = new System.Drawing.Size(800, 565);
+            this.Controls.Add(this.lblPageInfo);
             this.Controls.Add(this.btnPreviousPage);
             this.Controls.Add(this.btnNextPage);
             this.Controls.Add(this.panel_rad);
@@ -740,6 +767,7 @@ namespace Automatic_Storage
             this.panel_rad.ResumeLayout(false);
             this.panel_rad.PerformLayout();
             this.ResumeLayout(false);
+            this.PerformLayout();
 
         }
 
@@ -771,7 +799,7 @@ namespace Automatic_Storage
         private System.Windows.Forms.ProgressBar progressBar1;
         private System.Windows.Forms.Button selectButton;
         private System.Windows.Forms.Button btn_history;
-        private System.Windows.Forms.Panel panel5;
+        private System.Windows.Forms.Panel panel5; // 歷史查詢畫面
         private System.Windows.Forms.Button btn_reP2;
         private System.Windows.Forms.Button btn_itemSite;
         private System.Windows.Forms.Button btn_findAll;
@@ -802,6 +830,9 @@ namespace Automatic_Storage
         private System.Windows.Forms.RadioButton rad_in;
         private System.Windows.Forms.Button btnPreviousPage;
         private System.Windows.Forms.Button btnNextPage;
+        private System.Windows.Forms.Label lblCurrentPage;
+        private System.Windows.Forms.Label lblPageInfo;
+        private System.Windows.Forms.Button btn備料單匯入;
     }
 }
 
