@@ -4,16 +4,20 @@ using System.Data;
 using System.Data.SqlClient;
 using System.Linq;
 using System.Windows.Forms;
+using System.Configuration;
 
 namespace Automatic_Storage
 {
     class db
     {
+        // 取得連線字串：優先從 config 的 connectionStrings["conString"]，若不存在則為空字串。
+        // 注意：若需要實際連線資料庫，請在 app.config 的 <connectionStrings> 區段設定 name="conString"。
+        //private static readonly string connStr = ConfigurationManager.ConnectionStrings["conString"]?.ConnectionString ?? string.Empty;
         #region paramater method
         //本機測試
-        //private static readonly String connStr = "server=192.168.6.57;database=Automatic_Storage_M;uid=sa;pwd=A12345678;Connect Timeout = 10";
+        private static readonly String connStr = "server=192.168.6.57;database=Automatic_Storage_M;uid=sa;pwd=A12345678;Connect Timeout = 10";
         //正式環境
-        private static readonly String connStr = "server=192.168.4.120;database=Automatic_Storage;uid=Auto_sa;pwd=A12345678;Connect Timeout = 10";
+        //private static readonly String connStr = "server=192.168.4.120;database=Automatic_Storage;uid=Auto_sa;pwd=A12345678;Connect Timeout = 10";
         //ConfigurationManager.ConnectionStrings["conString"].ConnectionString;
         //1. 執行insert/update/delete，回傳影響的資料列數
 
@@ -87,8 +91,15 @@ namespace Automatic_Storage
             string Parameters = $"Parameters: {string.Join(", ", cmd.Parameters.Cast<SqlParameter>().Select(p => $"{p.ParameterName}={p.Value}"))}\n";
             string ButtonName = $"Button Name: {buttonName}";
 
-            // 在這裡加入你的日誌輸出邏輯，可以使用檔案輸出、資料庫紀錄、日誌庫等方式
-            Console.WriteLine(logMessage);
+            // 在這裡加入你的日誌輸出邏輯：改為使用集中式 Logger 非同步寫入，避免直接印到 Console
+            try
+            {
+                _ = System.Threading.Tasks.Task.Run(() => Automatic_Storage.Utilities.Logger.LogInfoAsync(logMessage));
+            }
+            catch
+            {
+                // Logging must not throw - 保持沉默以免影響主流程
+            }
             try
             {
                 string sqlcomm = "insert into Automatic_Storage_CommandLog" +
@@ -101,7 +112,18 @@ namespace Automatic_Storage
                 new SqlParameter("ButtonName",ButtonName),
                 new SqlParameter("date",DateTime.Now)
                 };
-                ExecueNonQuery(sqlcomm, CommandType.Text, sqlParameter);
+                // 非同步背景執行日誌寫入，避免阻塞主流程
+                System.Threading.Tasks.Task.Run(() =>
+                {
+                    try
+                    {
+                        ExecueNonQuery(sqlcomm, CommandType.Text, sqlParameter);
+                    }
+                    catch
+                    {
+                        // 忽略日誌寫入錯誤
+                    }
+                });
             }
             catch (Exception qrr)
             {
