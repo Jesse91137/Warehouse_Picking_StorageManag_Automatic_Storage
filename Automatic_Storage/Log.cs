@@ -5,7 +5,7 @@ namespace Automatic_Storage
     /// <summary>
     /// 提供系統操作記錄功能的類別。
     /// </summary>
-    class Log
+    sealed class Log
     {
         /// <summary>
         /// 定義資料庫操作的類型。
@@ -33,49 +33,49 @@ namespace Automatic_Storage
         /// <summary>
         /// 包含所有操作按鈕的名稱。
         /// </summary>
-        struct Action_Button
+        class Action_Button
         {
             /// <summary>入庫按鈕。</summary>
-            public string btn_Input;
+            public string btn_Input = string.Empty;
             /// <summary>出庫按鈕。</summary>
-            public string btn_Out;
+            public string btn_Out = string.Empty;
             /// <summary>批次入庫按鈕。</summary>
-            public string btn_BatIn;
+            public string btn_BatIn = string.Empty;
             /// <summary>批次出庫按鈕。</summary>
-            public string btn_BatOut;
+            public string btn_BatOut = string.Empty;
             /// <summary>查詢全部按鈕。</summary>
-            public string button1;
+            public string button1 = string.Empty;
             /// <summary>料號+儲位合併查詢按鈕。</summary>
-            public string btn_combi;
+            public string btn_combi = string.Empty;
             /// <summary>儲位刪除按鈕。</summary>
-            public string btn_delPosition;
+            public string btn_delPosition = string.Empty;
             /// <summary>歷史_全部查詢按鈕。</summary>
-            public string btn_findAll;
+            public string btn_findAll = string.Empty;
             /// <summary>歷史_料號+儲位合併查詢按鈕。</summary>
-            public string btn_itemSite;
+            public string btn_itemSite = string.Empty;
             /// <summary>歷史_返回按鈕。</summary>
-            public string btn_reP2;
+            public string btn_reP2 = string.Empty;
             /// <summary>檔案選擇按鈕。</summary>
-            public string selectButton;
+            public string selectButton = string.Empty;
             /// <summary>檔案上傳按鈕。</summary>
-            public string commitButton;
+            public string commitButton = string.Empty;
             /// <summary>檔案_介面返回按鈕。</summary>
-            public string btn_return;
+            public string btn_return = string.Empty;
             /// <summary>維護記錄按鈕。</summary>
-            public string maintainRecord;
+            public string maintainRecord = string.Empty;
             /// <summary>歷史記錄按鈕。</summary>
-            public string historyRecord;
+            public string historyRecord = string.Empty;
         }
 
         /// <summary>
         /// 包含所有操作文字框的名稱。
         /// </summary>
-        struct Action_TextBox
+        class Action_TextBox
         {
             /// <summary>料號記錄文字框。</summary>
-            public string itemRecord;
+            public string itemRecord = string.Empty;
             /// <summary>儲位記錄文字框。</summary>
-            public string positionRecord;
+            public string positionRecord = string.Empty;
         }
 
         /// <summary>
@@ -86,19 +86,9 @@ namespace Automatic_Storage
         {
             try
             {
-                string folder = AppDomain.CurrentDomain.BaseDirectory;
-                string path = System.IO.Path.Combine(folder, "Automatic_Storage.log");
-                string line = string.Format("[{0:yyyy-MM-dd HH:mm:ss}] {1}", DateTime.Now, EventName);
-                // 以集中式 logger 處理日誌，保留原先的同步 API 行為且不會丟例外
-                try
-                {
-                    // 使用集中式非同步 logger，採同步等待結果以維持 WriteLog 的同步契約
-                    Automatic_Storage.Utilities.Logger.LogInfoAsync(line).GetAwaiter().GetResult();
-                }
-                catch
-                {
-                    // logging must not throw - 最終保留沉默處理以免影響業務流程
-                }
+                string line = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {EventName}";
+                // 啟動非同步記錄但不等待（fire-and-forget），且不讓例外冒泡回呼叫端
+                _ = Automatic_Storage.Utilities.Logger.LogInfoAsync(line);
             }
             catch
             {
