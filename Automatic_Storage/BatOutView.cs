@@ -18,7 +18,9 @@ namespace Automatic_Storage
         /// <summary>
         /// 機種
         /// </summary>
+        #pragma warning disable CS0169 // 欄位從未使用過
         private string strEngsr;
+        #pragma warning restore CS0169
 
         /// <summary>
         /// 設定料號
@@ -111,7 +113,10 @@ namespace Automatic_Storage
 
         }
 
+        // 當前索引（有時會在邏輯流程外被指派但未直接讀取，保留以維持行為）
+        #pragma warning disable CS0414
         int cp = -1; // 當前索引
+        #pragma warning restore CS0414
 
         /// <summary>
         /// 取得出庫明細資料
