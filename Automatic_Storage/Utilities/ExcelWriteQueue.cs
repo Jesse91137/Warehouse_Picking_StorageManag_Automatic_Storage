@@ -158,15 +158,15 @@ namespace Automatic_Storage.Utilities
                         {
                             var pwd = _passwordProvider.GetPassword();
                             svc.UnprotectWorksheet(req.ExcelPath, pwd);
-                            Automatic_Storage.Utilities.Logger.LogInfoAsync($"Unprotected {req.ExcelPath} with configured password before write.").Wait();
+                            _ = System.Threading.Tasks.Task.Run(() => Automatic_Storage.Utilities.Logger.LogInfoAsync($"Unprotected {req.ExcelPath} with configured password before write."));
                         }
                         catch (Exception unex)
                         {
-                            Automatic_Storage.Utilities.Logger.LogErrorAsync($"Unprotect attempt failed for {req.ExcelPath}: {unex.Message}").Wait();
+                            _ = System.Threading.Tasks.Task.Run(() => Automatic_Storage.Utilities.Logger.LogErrorAsync($"Unprotect attempt failed for {req.ExcelPath}: {unex.Message}"));
                         }
 
                         svc.UpdateShippedAndAppendRecord(req.ExcelPath, req.MaterialCode, req.Qty, req.OperatorName);
-                        Automatic_Storage.Utilities.Logger.LogInfoAsync($"Excel write succeeded: {req.MaterialCode} +{req.Qty} to {req.ExcelPath}").Wait();
+                        _ = System.Threading.Tasks.Task.Run(() => Automatic_Storage.Utilities.Logger.LogInfoAsync($"Excel write succeeded: {req.MaterialCode} +{req.Qty} to {req.ExcelPath}"));
                         ok = true;
 
                         // Re-apply protection after a successful write to ensure sheets/columns remain locked.
@@ -176,16 +176,16 @@ namespace Automatic_Storage.Utilities
                             var pwd = _passwordProvider.GetPassword();
                             if (string.IsNullOrEmpty(pwd)) pwd = string.Empty;
                             svc.ProtectWorksheet(req.ExcelPath, pwd, protectShipped);
-                            Automatic_Storage.Utilities.Logger.LogInfoAsync($"Re-applied protection for {req.ExcelPath} (protectShippedColumn={protectShipped}, pwdSet={!string.IsNullOrEmpty(pwd)})").Wait();
+                            _ = System.Threading.Tasks.Task.Run(() => Automatic_Storage.Utilities.Logger.LogInfoAsync($"Re-applied protection for {req.ExcelPath} (protectShippedColumn={protectShipped}, pwdSet={!string.IsNullOrEmpty(pwd)})"));
                         }
                         catch (Exception ex)
                         {
-                            Automatic_Storage.Utilities.Logger.LogErrorAsync($"Failed to re-apply protection for {req.ExcelPath}: {ex.Message}").Wait();
+                            _ = System.Threading.Tasks.Task.Run(() => Automatic_Storage.Utilities.Logger.LogErrorAsync($"Failed to re-apply protection for {req.ExcelPath}: {ex.Message}"));
                         }
                     }
                     catch (Exception ex)
                     {
-                        Automatic_Storage.Utilities.Logger.LogErrorAsync($"Excel write attempt {attempt} failed for {req.MaterialCode} to {req.ExcelPath}: {ex.Message}").Wait();
+                        _ = System.Threading.Tasks.Task.Run(() => Automatic_Storage.Utilities.Logger.LogErrorAsync($"Excel write attempt {attempt} failed for {req.MaterialCode} to {req.ExcelPath}: {ex.Message}"));
                         // exponential backoff
                         Thread.Sleep(500 * attempt);
                     }
@@ -196,7 +196,7 @@ namespace Automatic_Storage.Utilities
                     // 最後失敗：寫入失敗紀錄以供人工處理
                     try
                     {
-                        Automatic_Storage.Utilities.Logger.LogErrorAsync($"Excel write permanently failed for {req.MaterialCode} to {req.ExcelPath}").Wait();
+                        _ = System.Threading.Tasks.Task.Run(() => Automatic_Storage.Utilities.Logger.LogErrorAsync($"Excel write permanently failed for {req.MaterialCode} to {req.ExcelPath}"));
                     }
                     catch { }
                 }
@@ -212,13 +212,13 @@ namespace Automatic_Storage.Utilities
             try { _cts.Cancel(); } catch { }
             try
             {
-                if (_workerThread != null && _workerThread.IsAlive)
+                        if (_workerThread != null && _workerThread.IsAlive)
                 {
                     // 給予背景執行緒額外時間完成。
                     if (!_workerThread.Join(5000))
                     {
                         // 無法在合理時間內停止，寫日誌並放棄強制中止（避免使用 Thread.Abort）
-                        try { Automatic_Storage.Utilities.Logger.LogErrorAsync("ExcelWriteQueue worker thread did not stop within timeout during Dispose.").Wait(); } catch { }
+                                try { _ = System.Threading.Tasks.Task.Run(() => Automatic_Storage.Utilities.Logger.LogErrorAsync("ExcelWriteQueue worker thread did not stop within timeout during Dispose.")); } catch { }
                     }
                 }
             }
