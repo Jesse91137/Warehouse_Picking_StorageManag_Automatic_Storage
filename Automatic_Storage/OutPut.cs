@@ -1,7 +1,9 @@
-﻿using System;
+﻿using Automatic_Storage.Dto;
+using System;
 using System.Data;
 using System.Data.SqlClient;
 using System.Drawing;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace Automatic_Storage
@@ -22,51 +24,6 @@ namespace Automatic_Storage
         {
             InitializeComponent(); // 初始化視窗元件
             isLoaded = false;      // 尚未設定控制項尺寸資料到 Tag 屬性
-        }
-
-        /// <summary>
-        /// 表示下拉選單中的包裝種類項目。
-        /// </summary>
-        /// <remarks>
-        /// 此類別用於儲存包裝顯示文字與對應的值，並在 ComboBox 控制項中顯示。
-        /// </remarks>
-        /// <example>
-        /// <code>
-        /// MyItem item = new MyItem("紙箱", "A01");
-        /// cbx_package.Items.Add(item);
-        /// </code>
-        /// </example>
-        public class MyItem
-        {
-            /// <summary>
-            /// 顯示於下拉選單的文字。
-            /// </summary>
-            public string text; // 顯示文字
-
-            /// <summary>
-            /// 對應的包裝代碼值。
-            /// </summary>
-            public string value; // 對應值
-
-            /// <summary>
-            /// 建立 MyItem 物件並指定顯示文字與值。
-            /// </summary>
-            /// <param name="text">顯示於下拉選單的文字。</param>
-            /// <param name="value">對應的包裝代碼值。</param>
-            public MyItem(string text, string value)
-            {
-                this.text = text; // 設定顯示文字
-                this.value = value; // 設定對應值
-            }
-
-            /// <summary>
-            /// 傳回顯示文字，供下拉選單顯示用。
-            /// </summary>
-            /// <returns>顯示文字。</returns>
-            public override string ToString()
-            {
-                return text; // 回傳顯示文字
-            }
         }
 
         #region 批次出庫來的參數
@@ -134,7 +91,7 @@ namespace Automatic_Storage
         /// </remarks>
         public void setValue()
         {
-            textBox1.Text = strItem; // 設定料號到 textBox1
+            textBox1.Text = strItem; // 設定料號到 [昶亨料號]欄位
             //textBox2.Text = strItem; // (註解) 可選擇設定料號到 textBox2
             string sSpec = strSpec; // 將規格存到區域變數 sSpec
             string sWono = strWono; // 將單號存到區域變數 sWono
@@ -166,15 +123,7 @@ namespace Automatic_Storage
         bool isLoaded;  // 是否已設定各控制的尺寸資料到Tag屬性
         #endregion
 
-        /// <summary>
-        /// 用於處理 DateTime? 型別的 Nullable 轉換器。
-        /// </summary>
-        /// <remarks>
-        /// 主要用於將控制項資料轉換為可為 null 的日期時間型別。
-        /// </remarks>
-        System.ComponentModel.NullableConverter nullableDateTime =
-            new System.ComponentModel.NullableConverter(typeof(DateTime?)); // DateTime? 型別的 Nullable 轉換器
-
+        #region 宣告變數
         /// <summary>
         /// 實際入庫日期字串。
         /// </summary>
@@ -246,6 +195,17 @@ namespace Automatic_Storage
         /// 格式為 yyyy-MM-dd HH:mm:ss，記錄本次出庫的時間。
         /// </remarks>
         string dateTime = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"); // 出庫日期時間
+        #endregion
+
+        /// <summary>
+        /// 用於處理 DateTime? 型別的 Nullable 轉換器。
+        /// </summary>
+        /// <remarks>
+        /// 主要用於將控制項資料轉換為可為 null 的日期時間型別。
+        /// </remarks>
+        System.ComponentModel.NullableConverter nullableDateTime =
+            new System.ComponentModel.NullableConverter(typeof(DateTime?)); // DateTime? 型別的 Nullable 轉換器
+
 
         /// <summary>
         /// 昶亨料號 onClick
@@ -259,18 +219,17 @@ namespace Automatic_Storage
                 label10.Text = "";
                 try
                 {
+                    // [昶亨料號]欄位
                     if (!string.IsNullOrEmpty(textBox1.Text))
                     {
                         txt_search = textBox1.Text.Trim().ToUpper();
-                    }
+                    }// [客戶料號]欄位
                     else if (!string.IsNullOrEmpty(txt_itemC.Text))
                     {
                         txt_search = txt_itemC.Text.Trim().ToUpper();
                     }
 
-                    //subShift(txt_search);
-                    //strShift = (sub == "-") ? StringSplit.StrLeft(txt_search, txt_search.Length - 3) : txt_search;
-
+                    /*查詢儲位資料且數量大於0*/
                     dt = dataBind();
                 }
                 catch (Exception ee)
@@ -286,7 +245,7 @@ namespace Automatic_Storage
 
                     for (int i = 0; i < dt.Rows.Count; i++)
                     {
-                        if ((dt.Rows[i]["Amount"]?.ToString() ?? string.Empty) == "0")
+                        if ((dt.Rows[i]["Amount"]?.ToString() ?? string.Empty) == "0")// 儲位數量
                         {
                             dataGridView1.Rows[i].DefaultCellStyle.BackColor = Color.MediumVioletRed;
                         }
@@ -312,7 +271,7 @@ namespace Automatic_Storage
         /// 同時會從資料庫載入所有包裝種類，並加入至 cbx_package 下拉選單。
         /// 若為批次出庫，則會依據批次參數查詢資料並綁定至 dataGridView1。
         /// </remarks>
-        private void OutPut_Load(object sender, EventArgs e)
+        private async void OutPut_Load(object sender, EventArgs e)
         {
             #region 獲取窗體info
             X = this.Width; // 取得窗體寬度
@@ -320,37 +279,57 @@ namespace Automatic_Storage
             isLoaded = true; // 標記已設定各控制項尺寸到 Tag 屬性
             SetTag(this); // 遞迴暫存所有控制項的尺寸資訊到 Tag 屬性
             #endregion
-
-            // Form_Load 設定包裝種類 cbox
-            // textBox3.Visible = false; // 預設隱藏 textBox3
+            // Form_Load 設定包裝種類 cbox（移至背景執行 DB 查詢以避免 UI 阻塞）
             string strsql = "select Package_View,code from Automatic_Storage_Package"; // 查詢所有包裝種類
-            DataSet cbx_ds = db.ExecuteDataSet(strsql, CommandType.Text, null); // 執行 SQL 並取得資料集
-            foreach (DataRow dr in cbx_ds.Tables[0].Rows)
+
+            // 在背景執行資料查詢，完成後在 UI 線程更新 ComboBox
+            DataSet cbx_ds = await Task.Run(() => db.ExecuteDataSet(strsql, CommandType.Text, null));
+            if (cbx_ds != null && cbx_ds.Tables.Count > 0)
             {
-                // 將每一筆包裝資料加入 cbx_package 下拉選單
-                cbx_package.Items.Add(new MyItem(dr["Package_View"]?.ToString() ?? string.Empty, dr["code"]?.ToString() ?? string.Empty));
+                /* 此類別用於儲存包裝顯示文字與對應的值，並在 ComboBox 控制項中顯示。
+                 *  MyItem item = new MyItem("紙箱", "A01");*/
+
+                var items = new System.Collections.Generic.List<MyItemDto>();
+                foreach (DataRow dr in cbx_ds.Tables[0].Rows)
+                {
+                    items.Add(new MyItemDto(dr["Package_View"]?.ToString() ?? string.Empty, dr["code"]?.ToString() ?? string.Empty));
+                }
+                if (items.Count > 0)
+                {
+                    this.BeginInvoke((Action)(() =>
+                    {
+                        cbx_package.Items.Clear();
+                        foreach (var it in items) cbx_package.Items.Add(it);
+                    }));
+                }
             }
-            // 判斷是否來自批次視窗
+
+            // 判斷是否來自批次視窗（批次查詢也移到背景執行）
             if (strBat)
             {
-                // 若為批次出庫，依據批次參數查詢出庫明細
                 string sqlstr = "select Actual_InDate,Item_No_Master ,Item_No_Slave ,Amount ,Position ,Package,Spec  ,Mark ,Sno ,Reel_ID,PCB_DC,CMC_DC  " +
                             "from Automatic_Storage_Detail " +
                             "where Unit_No = @unitNo and Item_No_Master = @Item and Spec = @Spec " +
                             "and Amount > 0  order by position asc";
                 SqlParameter[] parm = new SqlParameter[]
                 {
-                new SqlParameter("unitNo",Login.Unit_No), // 單位編號參數
-                new SqlParameter("Item",strItem),         // 料號參數
-                new SqlParameter("Spec",strSpec)          // 規格參數
+                    new SqlParameter("unitNo",Login.Unit_No), // 單位編號參數
+                    new SqlParameter("Item",strItem),         // 料號參數
+                    new SqlParameter("Spec",strSpec)          // 規格參數
                 };
-                dataGridView1.Visible = true; // 顯示資料表
-                                              // textBox3.Visible = true; // (註解) 可選擇顯示 textBox3
-                                              // bat_confirm.Visible = true; // (註解) 可選擇顯示批次確認按鈕
-                textBox4.Text = ""; // 清空出庫數量欄位
-                                    // txt_Amount_U.Text = ""; // (註解) 清空單位數欄位
-                dt = db.ExecuteDataTable(sqlstr, CommandType.Text, parm); // 執行查詢並取得資料表
-                dataGridView1.DataSource = dt; // 綁定查詢結果至資料表
+
+                // 在背景讀取資料，再回到 UI 綁定
+                var dtResult = await Task.Run(() => db.ExecuteDataTable(sqlstr, CommandType.Text, parm));
+                if (dtResult != null)
+                {
+                    this.BeginInvoke((Action)(() =>
+                    {
+                        dataGridView1.Visible = true;
+                        textBox4.Text = string.Empty;
+                        dt = dtResult;
+                        dataGridView1.DataSource = dt;
+                    }));
+                }
             }
         }
 
@@ -377,7 +356,7 @@ namespace Automatic_Storage
             // 判斷是否按下 Enter 鍵且不是批次出庫
             if (e.KeyChar == 13 && !strBat)
             {
-                // 若料號欄位有值則取料號
+                // 若昶亨料號欄位有值則取料號
                 if (!string.IsNullOrEmpty(textBox1.Text))
                 {
                     txt_dulCheck = textBox1.Text.Trim().ToUpper();
@@ -391,11 +370,11 @@ namespace Automatic_Storage
                 if (!Debit()) return;
 
                 // 重設所有欄位並重新查詢資料
-                textBox1.Focus();           // 料號欄位取得焦點
-                textBox1.Text = "";         // 清空料號
+                textBox1.Focus();           // [昶亨料號]欄位取得焦點
+                textBox1.Text = "";         // 清空[昶亨料號]
                 textBox2.Text = "";         // 清空客戶料號
-                textBox3.Text = "";         // 清空儲位
-                txt_Mark.Text = "";         // 清空備註
+                textBox3.Text = "";         // 清空[儲位確認]
+                txt_Mark.Text = "";         // 清空[備註]
                                             //txt_Amount_U.Text = "";   // (註解) 清空單位數
                 textBox4.Text = "";         // 清空出庫數量
                 label10.Text = "";          // 清空提示訊息
@@ -428,20 +407,20 @@ namespace Automatic_Storage
                         //label4.Font = new Font("微軟正黑體", 18, FontStyle.Bold);//微軟正黑體, 12pt, style=Bold
                         //label4.ForeColor = Color.Black;
                         //label4.Text = "儲位確認";
-                        //textBox3.Visible = true;
+                        //textBox3.Visible = true; [儲位確認]
                         textBox4.Focus(); // 將焦點移至 textBox4
                     }
                     else
                     {
                         // 若查詢結果無資料，清空料號與客戶料號欄位並將焦點移回料號欄位
-                        textBox1.Text = ""; // 清空料號欄位
+                        textBox1.Text = ""; // 清空昶亨料號欄位
                         textBox2.Text = ""; // 清空客戶料號欄位
-                        textBox1.Focus();   // 將焦點移回料號欄位
+                        textBox1.Focus();   // 將焦點移回昶亨料號欄位
                     }
                     break;
                 default:
                     // cp 非 0，表示料號確認錯誤
-                    textBox3.Visible = false; // 隱藏儲位欄位
+                    textBox3.Visible = false; // 隱藏[儲位確認]欄位
                     label4.Font = new Font("微軟正黑體", 18, FontStyle.Bold); // 設定提示文字字型
                     label4.ForeColor = Color.Red; // 設定提示文字顏色為紅色
                     label4.Text = "料卷有誤,請再次確認!!"; // 顯示錯誤訊息
@@ -450,12 +429,12 @@ namespace Automatic_Storage
         }
 
         /// <summary>
-        /// 處理 textBox3 的按鍵事件，判斷是否按下 Enter 鍵並執行料號比對。
+        /// 處理 [儲位確認]- 的按鍵事件，判斷是否按下 Enter 鍵並執行料號比對。
         /// </summary>
         /// <param name="sender">事件來源物件。</param>
         /// <param name="e">按鍵事件參數。</param>
         /// <remarks>
-        /// 當按下 Enter 鍵時，會將 textBox2 的文字轉成大寫後與 textBox1 或 txt_itemC 的文字進行比對，
+        /// 當按下 Enter 鍵時，會將 textBox2 的文字轉成大寫後與 昶亨料號 或 txt_itemC 的文字進行比對，
         /// 並將比對結果存到 cp 變數，供後續料號確認流程使用。
         /// </remarks>
         private void textBox3_KeyPress(object sender, KeyPressEventArgs e)
@@ -465,16 +444,16 @@ namespace Automatic_Storage
             {
                 // 取得 textBox2 的文字並轉成大寫，作為比對用字串
                 string auditText = textBox2.Text.Trim().ToUpper();
-                // 若 textBox1 有值，則與 auditText 進行比對
+                // 若 [昶亨料號] 有值，則與 auditText 進行比對
                 if (!string.IsNullOrEmpty(textBox1.Text))
                 {
-                    // 比對 textBox1 的文字與 auditText，結果存到 cp
+                    // 比對 [昶亨料號] 的文字與 auditText，結果存到 cp
                     cp = textBox1.Text.Trim().ToUpper().CompareTo(auditText);
                 }
-                // 若 txt_itemC 有值，則與 auditText 進行比對
+                // 若 客戶料號] 有值，則與 auditText 進行比對
                 else if (!string.IsNullOrEmpty(txt_itemC.Text))
                 {
-                    // 比對 txt_itemC 的文字與 auditText，結果存到 cp
+                    // 比對 [客戶料號] 的文字與 auditText，結果存到 cp
                     cp = txt_itemC.Text.Trim().ToUpper().CompareTo(auditText);
                 }
 
@@ -500,7 +479,8 @@ namespace Automatic_Storage
         /// </returns>
         public bool Debit()
         {
-            // 檢查 textBox1 是否有值，若有則將料號存到 txt_dulCheck
+            var swTotal = System.Diagnostics.Stopwatch.StartNew();
+            // 檢查 [昶亨料號]欄位 是否有值，若有則將料號存到 txt_dulCheck
             if (!string.IsNullOrEmpty(textBox1.Text))
             {
                 txt_dulCheck = textBox1.Text.Trim().ToUpper();
@@ -528,10 +508,12 @@ namespace Automatic_Storage
                 label10.Text = "料號確認有誤,請重新確認!";
                 return false;
             }
+            long insertMs = 0;
+            long updateMs = 0;
             try
             {
-                // 取得目前選取的包裝種類 MyItem 物件
-                MyItem myItem = (MyItem)this.cbx_package.SelectedItem;
+                // 取得目前選取的包裝種類 MyItemDto 物件
+                MyItemDto myItem = (MyItemDto)this.cbx_package.SelectedItem;
                 // 建立出庫資料新增 SQL 指令
                 string sqlOut = @"insert into Automatic_Storage_Output (Sno,Item_No_Master,Item_No_Slave,Spec,Position,
                                    Amount,Package,Unit_No,Output_UserNo,Output_Date,Wo_No,Mark,Reel_ID,PCB_DC,CMC_DC ) 
@@ -554,20 +536,12 @@ namespace Automatic_Storage
                 new SqlParameter("sno",sno.Trim()),
                 };
 
-                // 執行出庫資料新增，若失敗則重設 cp 狀態並呼叫 lb4Change，最後返回 false
-                if (db.ExecueNonQuery(sqlOut, CommandType.Text, "單筆出庫text確認", parm1) == 0)
-                {
-                    cp = -1;
-                    lb4Change();
-                    return false;
-                }
-
                 // 建立庫存明細更新 SQL 指令
                 string sqlDetail = @"update Automatic_Storage_Detail 
                                    set Amount = Amount-@amount ,
                                    Up_OutDate = @outdate ,Output_UserNo = @outuser ,Mark = @mark ,Reel_ID = @reelid ";
 
-                // 若 textBox1 有值則以 Item_No_Master 為條件
+                // 若 [昶亨料號]欄位 有值則以 Item_No_Master 為條件
                 if (!string.IsNullOrEmpty(textBox1.Text))
                 {
                     sqlDetail += @"where Item_No_Master = @master and Position=@position and Package=@package 
@@ -596,14 +570,48 @@ namespace Automatic_Storage
                 new SqlParameter("sno",sno)
                 };
 
-                // 執行庫存明細更新
+                // 【優化】使用 db.ExecueNonQuery 以保持資料層一致性並避免直接開新連線
+                var swInsert = System.Diagnostics.Stopwatch.StartNew();
+                if (db.ExecueNonQuery(sqlOut, CommandType.Text, "單筆出庫text確認", parm1) == 0)
+                {
+                    cp = -1;
+                    lb4Change();
+                    return false;
+                }
+                swInsert.Stop();
+                insertMs = swInsert.ElapsedMilliseconds;
+
+                var swUpdate = System.Diagnostics.Stopwatch.StartNew();
                 db.ExecueNonQuery(sqlDetail, CommandType.Text, "單筆出庫Detail更新", parm2);
+                swUpdate.Stop();
+                updateMs = swUpdate.ElapsedMilliseconds;
             }
             catch (Exception ex)
             {
                 // 若發生例外則顯示錯誤訊息
                 MessageBox.Show(ex.Message);
+                return false;
             }
+            swTotal.Stop();
+
+            // 使用 TimeSpan 取得秒數（小數點後2位）
+            var tsTotal = TimeSpan.FromMilliseconds(swTotal.ElapsedMilliseconds);
+            var tsInsert = TimeSpan.FromMilliseconds(insertMs);
+            var tsUpdate = TimeSpan.FromMilliseconds(updateMs);
+            double totalSec = Math.Round(tsTotal.TotalSeconds, 2);
+            double insertSec = Math.Round(tsInsert.TotalSeconds, 2);
+            double updateSec = Math.Round(tsUpdate.TotalSeconds, 2);
+            // 顯示效能資訊（單位：秒）
+            //string perfMsg = $"📊 出庫寫入效能統計\n\n" +
+            //               $"總耗時: {totalSec} 秒\n" +
+            //               $"INSERT: {insertSec} 秒\n" +
+            //               $"UPDATE: {updateSec} 秒";
+            // MessageBox.Show(perfMsg, "出庫效能診斷 ⏱️", MessageBoxButtons.OK, MessageBoxIcon.Information);
+
+            // 【優化】改為非同步背景記錄效能資訊，不阻塞 UI（減少 100-300ms 日誌延遲）
+            string perfMsg = $"📊 出庫寫入效能統計 | 總耗時: {totalSec} 秒 | INSERT: {insertSec} 秒 | UPDATE: {updateSec} 秒";
+            Log log = new Log();
+            _ = System.Threading.Tasks.Task.Run(() => log.WriteLog(perfMsg)); // 背景非同步記錄
             // 出庫流程成功，回傳 true
             return true;
         }
@@ -613,7 +621,7 @@ namespace Automatic_Storage
         /// 查詢出庫明細資料，依據輸入的料號或客戶料號回傳對應的 DataTable。
         /// </summary>
         /// <remarks>
-        /// 此方法會根據 textBox1 或 txt_itemC 的內容，組合 SQL 查詢語句，
+        /// 此方法會根據 [昶亨料號]欄位 或 txt_itemC 的內容，組合 SQL 查詢語句，
         /// 並以參數方式帶入單位編號與料號，回傳查詢結果的 DataTable。
         /// </remarks>
         /// <returns>
@@ -629,13 +637,13 @@ namespace Automatic_Storage
             // 建立查詢出庫明細的 SQL 語句
             string sqlstr = "select Actual_InDate,Item_No_Master ,Item_No_Slave ,Amount ,Position ,Package ,Spec ,Mark ,Sno ,Reel_ID,PCB_DC,CMC_DC  " +
                     "from Automatic_Storage_Detail ";
-            // 如果 textBox1 有輸入料號，則以 Item_No_Master 為條件查詢
+            // 如果 [昶亨料號]欄位 有輸入料號，則以 Item_No_Master 為條件查詢
             if (!string.IsNullOrEmpty(textBox1.Text))
             {
                 sqlstr += "where Unit_No = @unitNo and Item_No_Master = @Item " +
                       "and Amount > 0  order by Actual_InDate asc";
             }
-            // 如果 txt_itemC 有輸入客戶料號，則以 Item_No_Slave 為條件查詢
+            // 如果 [客戶料號]欄位 有輸入客戶料號，則以 Item_No_Slave 為條件查詢
             else if (!string.IsNullOrEmpty(txt_itemC.Text))
             {
                 sqlstr += "where Unit_No = @unitNo and Item_No_Slave = @Item " +
@@ -763,7 +771,15 @@ namespace Automatic_Storage
         /// <param name="e"></param>/ </remarks>
         private void OutPut_Shown(object sender, EventArgs e)
         {
-            this.WindowState = FormWindowState.Maximized;
+            // 延遲在下一個訊息循環設定最大化，避免與其他視窗顯示/焦點競爭產生閃爍或短暫停頓
+            this.BeginInvoke((Action)(() =>
+            {
+                try
+                {
+                    this.WindowState = FormWindowState.Maximized;
+                }
+                catch { }
+            }));
         }
 
         /// <summary>
@@ -842,7 +858,13 @@ namespace Automatic_Storage
                             break;
                     }
                     // 檢查出庫數量是否超過庫存，若超過則顯示錯誤訊息
-                    if (Amount > Convert.ToDouble(dt.Rows[0]["Amount"]?.ToString() ?? "0"))
+                    if (dt == null || dt.Rows.Count == 0)
+                    {
+                        label10.Text = "找不到資料,請重新查詢!";
+                        return;
+                    }
+                    double availableKeyPress = Convert.ToDouble(dt.Rows[0]["Amount"]?.ToString() ?? "0");
+                    if (Amount > availableKeyPress)
                     {
                         label10.Text = "總數量有誤,請重新確認!";
                         return;
@@ -893,7 +915,13 @@ namespace Automatic_Storage
                     break;
             }
             // 檢查出庫數量是否超過庫存，若超過則顯示錯誤訊息
-            if (Amount > Convert.ToDouble(dt.Rows[0]["Amount"]?.ToString() ?? "0"))
+            if (dt == null || dt.Rows.Count == 0)
+            {
+                label10.Text = "找不到資料,請重新查詢!";
+                return;
+            }
+            double availableLeave = Convert.ToDouble(dt.Rows[0]["Amount"]?.ToString() ?? "0");
+            if (Amount > availableLeave)
             {
                 label10.Text = "總數量有誤,請重新確認!";
                 return;
@@ -952,7 +980,7 @@ namespace Automatic_Storage
         /// 並根據包裝代碼查詢包裝種類，設定下拉選單選項。
         /// 最後隱藏 visible_Panel 並將焦點移至出庫數量欄位。
         /// </remarks>
-        private void dataGridView1_DoubleClick(object sender, EventArgs e)
+        private async void dataGridView1_DoubleClick(object sender, EventArgs e)
         {
             #region 先進先出管控
             //if (dataGridView1.CurrentRow.Index != 0)
@@ -980,39 +1008,68 @@ namespace Automatic_Storage
             10=pcb_dc
             11=cmc_dc
              */
+            // 取得目前選取列並檢查 null，避免編譯器對 null 參考的警告
+            var row = dataGridView1.CurrentRow;
+            if (row == null) return;
+
             // 庫存數（保守 null 安全處理）
-            var inventoryObj = dataGridView1.CurrentRow?.Cells[3].Value;
+            var inventoryObj = row.Cells[3].Value;
             inventory = inventoryObj != null ? Convert.ToDouble(inventoryObj) : 0.0;
             // 儲位
-            textBox3.Text = dataGridView1.CurrentRow.Cells[4].Value?.ToString() ?? string.Empty;
+            textBox3.Text = row.Cells[4].Value?.ToString() ?? string.Empty;
             // 備註
-            txt_Mark.Text = dataGridView1.CurrentRow.Cells[7].Value?.ToString() ?? string.Empty;
+            txt_Mark.Text = row.Cells[7].Value?.ToString() ?? string.Empty;
             // 入庫日期
-            actualDate = Convert.ToDateTime(dataGridView1.CurrentRow?.Cells[0].Value?.ToString() ?? string.Empty).ToString("yyyy-MM-dd");
+            actualDate = Convert.ToDateTime(row.Cells[0].Value?.ToString() ?? string.Empty).ToString("yyyy-MM-dd");
 
-            sno = dataGridView1.CurrentRow?.Cells[8].Value?.ToString() ?? string.Empty;
+            sno = row.Cells[8].Value?.ToString() ?? string.Empty;
 
-            string strpackage = "select id from Automatic_Storage_Package " +
-                "where code = '" + (dataGridView1.CurrentRow?.Cells[5].Value?.ToString() ?? string.Empty) + "'";
-            DataSet dscpk = db.ExecuteDataSet(strpackage, CommandType.Text, null);
-            cbx_package.SelectedIndex = Convert.ToInt32(dscpk.Tables[0].Rows[0]["id"]) - 1;
+            // 【優化】改為非同步 + 參數化查詢（避免3-5秒 UI 阻塞 + SQL 注入防護）
+            string packageCode = row.Cells[5].Value?.ToString() ?? string.Empty;
+            if (!string.IsNullOrEmpty(packageCode))
+            {
+                string strpackage = "select id from Automatic_Storage_Package where code = @code";
+                SqlParameter[] parms = new SqlParameter[] { new SqlParameter("@code", packageCode) };
+
+                // 背景執行查詢，不阻塞 UI 線程
+                var dscpk = await Task.Run(() => db.ExecuteDataSet(strpackage, CommandType.Text, parms));
+
+                // 回到 UI 線程更新控制項
+                this.BeginInvoke((Action)(() =>
+                {
+                    if (dscpk != null && dscpk.Tables.Count > 0 && dscpk.Tables[0].Rows.Count > 0)
+                    {
+                        int idVal = 0;
+                        int.TryParse(dscpk.Tables[0].Rows[0]["id"]?.ToString() ?? "0", out idVal);
+                        cbx_package.SelectedIndex = (idVal > 0) ? idVal - 1 : -1;
+                    }
+                    else
+                    {
+                        cbx_package.SelectedIndex = -1;
+                    }
+                }));
+            }
+            else
+            {
+                cbx_package.SelectedIndex = -1;
+            }
 
             visible_Panel.Visible = false;
             textBox4.Focus();
         }
 
         /// <summary>
-        /// textBox1 文字變更事件，根據輸入狀態切換 txt_itemC 或 textBox1 的啟用狀態。
+        /// [昶亨料號]欄位 文字變更事件，根據輸入狀態切換 [客戶料號]欄位 或 [昶亨料號]欄位 的啟用狀態。
         /// </summary>
-        /// <param name="sender">事件來源物件，通常為 textBox1。</param>
+        /// <param name="sender">事件來源物件，通常為 [昶亨料號]欄位。</param>
         /// <param name="e">事件參數。</param>
         /// <remarks>
-        /// 當 textBox1 有輸入時，停用 txt_itemC；
-        /// 當 txt_itemC 有輸入時，停用 textBox1。
+        /// 當 [昶亨料號]欄位 有輸入時，停用 [客戶料號]欄位；
+        /// 當 [客戶料號]欄位 有輸入時，停用 [昶亨料號]欄位。
         /// </remarks>
         private void textBox1_TextChanged(object sender, EventArgs e)
         {
-            // 根據 textBox1 與 txt_itemC 的輸入狀態切換啟用狀態
+            // 根據 [昶亨料號]欄位 與 [客戶料號]欄位 的輸入狀態切換啟用狀態
             if (!string.IsNullOrEmpty(textBox1.Text))
             {
                 txt_itemC.Enabled = false;
