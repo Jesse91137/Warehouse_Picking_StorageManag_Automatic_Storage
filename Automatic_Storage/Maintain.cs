@@ -1,4 +1,8 @@
-﻿using System;
+﻿using Automatic_Storage.Dto;
+using NPOI.HSSF.UserModel;
+using NPOI.SS.UserModel;
+using NPOI.XSSF.UserModel;
+using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Data;
@@ -13,43 +17,11 @@ using System.Windows.Threading;
 namespace Automatic_Storage
 {
     /// <summary>
+    /// 管理設定功能視窗
     /// 管理儲位、規格、人員、訊息等功能的主視窗。
     /// </summary>
     public partial class Maintain : Form
     {
-        /// <summary>
-        /// 下拉選單用的項目類別，包含顯示文字與值。
-        /// </summary>
-        public class MyItem
-        {
-            /// <summary>
-            /// 顯示文字
-            /// </summary>
-            public string text;
-            /// <summary>
-            /// 對應值
-            /// </summary>
-            public string value;
-
-            /// <summary>
-            /// 建構子，初始化顯示文字與值。
-            /// </summary>
-            /// <param name="text">顯示文字</param>
-            /// <param name="value">對應值</param>
-            public MyItem(string text, string value)
-            {
-                this.text = text;
-                this.value = value;
-            }
-            /// <summary>
-            /// 傳回顯示文字
-            /// </summary>
-            /// <returns>顯示文字</returns>
-            public override string ToString()
-            {
-                return text;
-            }
-        }
 
         /// <summary>
         /// 建構子，初始化元件與資料表。
@@ -61,14 +33,16 @@ namespace Automatic_Storage
             dd = dd ?? columnsData(); // 初始化儲位資料表
         }
 
+        #region 宣告變數
         /// <summary>
         /// Excel匯入筆數
         /// </summary>
-        int inputexcelcount = 0, btn_fAll = 0, btn_itemP = 0;
-        /// <summary>
-        /// 初始化總數
-        /// </summary>
+        int inputexcelcount = 0;
+        // 以下欄位會在某些狀態下被指派但未直接使用，保留以維持行為一致性。
+#pragma warning disable CS0414
+        int btn_fAll = 0, btn_itemP = 0;
         int initSum = 0;
+#pragma warning restore CS0414
         /// <summary>
         /// Excel資料集
         /// </summary>
@@ -77,6 +51,28 @@ namespace Automatic_Storage
         /// 計時器
         /// </summary>
         DispatcherTimer dispatcherTimer = new DispatcherTimer();
+
+        /// <summary>
+        /// 目前時間字串
+        /// </summary>
+        static string time = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+        /// <summary>
+        /// 儲位資料表
+        /// </summary>
+        public DataTable dd;
+        /// <summary>
+        /// 明細資料表
+        /// </summary>
+        public DataTable dataT = new DataTable();
+        /// <summary>
+        /// 狀態旗標
+        /// </summary>
+        bool flag = false;
+        /// <summary>
+        /// 儲位序號
+        /// </summary>
+        static string position_sno;
+        #endregion
 
         #region 視窗ReSize
         /// <summary>
@@ -99,6 +95,66 @@ namespace Automatic_Storage
         /// 是否已載入控制項尺寸
         /// </summary>
         bool isLoaded;
+        #endregion
+
+        #region 儲位新增
+        /// <summary>
+        /// 按下「儲位新增」按鈕時，依序檢查 12 個儲位輸入框，若有輸入且未重複則新增儲位，否則顯示重複警告。
+        /// </summary>
+        /// <param name="sender">事件來源物件</param>
+        /// <param name="e">事件參數</param>
+        private void btn_submit_Click(object sender, EventArgs e)
+        {
+            try
+            {
+                TimerStart(); // 啟動計時器，2 秒後清空所有儲位輸入框
+                // 建立 12 個儲位輸入框的陣列
+                /* 儲位新增-輸入儲位新增1~12 */
+                TextBox[] txt = new TextBox[12] { txt_Position1 , txt_Position2 , txt_Position3 , txt_Position4 , txt_Position5 , txt_Position6 ,
+                            txt_Position7 , txt_Position8 ,txt_Position9,txt_Position10,txt_Position11,txt_Position12};
+                for (int i = 0; i < txt.Length; i++)
+                {
+                    // 檢查儲位輸入框是否有輸入內容
+                    if (txt[i].Text != "")
+                    {
+                        // 查詢該儲位是否已存在
+                        string str_s = @"select * from Automatic_Storage_Position where Unit_No=@unitno and Position=@position";
+                        SqlParameter[] parm_s = new SqlParameter[]
+                        {
+                                new SqlParameter("unitno",Login.Unit_No), // 單位編號參數
+                                new SqlParameter("position",txt[i].Text.Trim()), // 儲位名稱參數
+                        };
+                        DataSet dataSet = db.ExecuteDataSet(str_s, CommandType.Text, parm_s); // 執行查詢
+                        // 若查詢結果為 0 筆，表示儲位未重複
+                        if (dataSet.Tables[0].Rows.Count == 0)
+                        {
+                            // 新增儲位資料
+                            string strsql = @"insert into Automatic_Storage_Position (Unit_No,Position,Create_User,Create_Date) values
+                                                        (@unitno, @position, @cr_user, @cr_date)";
+                            SqlParameter[] parameters = new SqlParameter[]
+                            {
+                                    new SqlParameter("unitno",Login.Unit_No), // 單位編號
+                                    new SqlParameter("position",txt[i].Text.Trim().ToUpper()), // 儲位名稱(轉大寫)
+                                    new SqlParameter("cr_user",Login.User_No), // 建立人員編號
+                                    new SqlParameter("cr_date",time) // 建立日期
+                            };
+                            db.ExecueNonQuery(strsql, CommandType.Text, parameters); // 執行新增
+                            lab_finish.Text = "儲位新增完成"; // 顯示新增完成訊息
+                        }
+                        else
+                        {
+                            // 若儲位重複，顯示警告訊息
+                            MessageBox.Show("第 " + (i + 1) + " 儲位重複,請再次確認");
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                // 發生例外時顯示錯誤訊息
+                MessageBox.Show(ex.Message);
+            }
+        }
         #endregion
 
         /// <summary>
@@ -138,27 +194,6 @@ namespace Automatic_Storage
                 return data;
             }
         }
-
-        /// <summary>
-        /// 目前時間字串
-        /// </summary>
-        static string time = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
-        /// <summary>
-        /// 儲位資料表
-        /// </summary>
-        public DataTable dd;
-        /// <summary>
-        /// 明細資料表
-        /// </summary>
-        public DataTable dataT = new DataTable();
-        /// <summary>
-        /// 狀態旗標
-        /// </summary>
-        bool flag = false;
-        /// <summary>
-        /// 儲位序號
-        /// </summary>
-        static string position_sno;
 
         /// <summary>
         /// TabControl切換事件
@@ -249,6 +284,7 @@ namespace Automatic_Storage
                 dr["Create_Date"] = row["Create_Date"].ToString(); // 設定建立日期
                 dd.Rows.Add(dr); // 加入儲位資料表
             }
+            /* 儲位清單-查詢結果 */
             dataGridView2.DataSource = dd; // 將儲位資料表繫結到 DataGridView 顯示
         }
         /// <summary>
@@ -276,64 +312,7 @@ namespace Automatic_Storage
         }
 
         /// <summary>
-        /// 按下「儲位新增」按鈕時，依序檢查 12 個儲位輸入框，若有輸入且未重複則新增儲位，否則顯示重複警告。
-        /// </summary>
-        /// <param name="sender">事件來源物件</param>
-        /// <param name="e">事件參數</param>
-        private void btn_submit_Click(object sender, EventArgs e)
-        {
-            try
-            {
-                TimerStart(); // 啟動計時器，2 秒後清空所有儲位輸入框
-                // 建立 12 個儲位輸入框的陣列
-                TextBox[] txt = new TextBox[12] { txt_Position1 , txt_Position2 , txt_Position3 , txt_Position4 , txt_Position5 , txt_Position6 ,
-                            txt_Position7 , txt_Position8 ,txt_Position9,txt_Position10,txt_Position11,txt_Position12};
-                for (int i = 0; i < txt.Length; i++)
-                {
-                    // 檢查儲位輸入框是否有輸入內容
-                    if (txt[i].Text != "")
-                    {
-                        // 查詢該儲位是否已存在
-                        string str_s = @"select * from Automatic_Storage_Position where Unit_No=@unitno and Position=@position";
-                        SqlParameter[] parm_s = new SqlParameter[]
-                        {
-                                new SqlParameter("unitno",Login.Unit_No), // 單位編號參數
-                                new SqlParameter("position",txt[i].Text.Trim()), // 儲位名稱參數
-                        };
-                        DataSet dataSet = db.ExecuteDataSet(str_s, CommandType.Text, parm_s); // 執行查詢
-                        // 若查詢結果為 0 筆，表示儲位未重複
-                        if (dataSet.Tables[0].Rows.Count == 0)
-                        {
-                            // 新增儲位資料
-                            string strsql = @"insert into Automatic_Storage_Position (Unit_No,Position,Create_User,Create_Date) values
-                                                        (@unitno, @position, @cr_user, @cr_date)";
-                            SqlParameter[] parameters = new SqlParameter[]
-                            {
-                                    new SqlParameter("unitno",Login.Unit_No), // 單位編號
-                                    new SqlParameter("position",txt[i].Text.Trim().ToUpper()), // 儲位名稱(轉大寫)
-                                    new SqlParameter("cr_user",Login.User_No), // 建立人員編號
-                                    new SqlParameter("cr_date",time) // 建立日期
-                            };
-                            db.ExecueNonQuery(strsql, CommandType.Text, parameters); // 執行新增
-                            lab_finish.Text = "儲位新增完成"; // 顯示新增完成訊息
-                        }
-                        else
-                        {
-                            // 若儲位重複，顯示警告訊息
-                            MessageBox.Show("第 " + (i + 1) + " 儲位重複,請再次確認");
-                        }
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                // 發生例外時顯示錯誤訊息
-                MessageBox.Show(ex.Message);
-            }
-        }
-
-        /// <summary>
-        /// DataGridView2 儲位資料表格的儲存格點擊事件。
+        /// 儲位清單-查詢結果--DataGridView2 儲位資料表格的儲存格點擊事件。
         /// 根據點擊的欄位執行不同動作：
         /// - 欄位0：進入儲位編輯模式。
         /// - 欄位1：執行儲位刪除。
@@ -342,7 +321,7 @@ namespace Automatic_Storage
         /// <param name="e">事件參數，包含點擊的儲存格位置。</param>
         private void dataGridView2_CellContentClick(object sender, DataGridViewCellEventArgs e)
         {
-            switch (e.ColumnIndex)
+            switch (e.ColumnIndex)// 代表使用者點擊的那一格屬於第幾欄（從 0 開始）
             {
                 case 0:
                     // 取得目前選取的列索引
@@ -365,7 +344,7 @@ namespace Automatic_Storage
         }
 
         /// <summary>
-        /// DataGridView2 編輯控制項顯示事件。
+        /// 儲位清單-查詢結果--DataGridView2 編輯控制項顯示事件。
         /// 判斷是否為 Position 欄位，若是則設定編輯狀態並將目前儲位資訊帶入編輯框。
         /// </summary>
         /// <param name="sender">事件來源物件，通常為 DataGridView2。</param>
@@ -390,7 +369,7 @@ namespace Automatic_Storage
 
         /// <summary>
         /// txt_position_s_KeyPress 事件處理函式，當使用者在 txt_position_s 輸入框按下 Enter 鍵時觸發，
-        /// 依據輸入的儲位名稱查詢資料庫，並將結果顯示於 dataGridView2。
+        /// 依據輸入的儲位名稱查詢資料庫，並將結果顯示於 儲位清單-查詢結果--dataGridView2。
         /// </summary>
         /// <param name="sender">事件來源物件，通常為 txt_position_s 輸入框。</param>
         /// <param name="e">事件參數，包含按下的鍵。</param>
@@ -404,8 +383,8 @@ namespace Automatic_Storage
                     dd.Clear(); // 清空儲位資料表
                     // 建立查詢儲位的 SQL 語句
                     string strsql = @"select a.Sno as sno,UNIT_NAME,User_name,Position,Create_Date from Automatic_Storage_Position a
-                                                 left join Automatic_Storage_UnitNo b on a.Unit_No=b.UNIT_NO ,Automatic_Storage_User c 
-                                                 where a.Unit_No='M' and a.Create_User=c.User_No and a.Unit_No=@unitno and Position=@position ";
+                                        left join Automatic_Storage_UnitNo b on a.Unit_No=b.UNIT_NO ,Automatic_Storage_User c 
+                                        where a.Unit_No='M' and a.Create_User=c.User_No and a.Unit_No=@unitno and Position=@position ";
                     // 建立 SQL 參數，指定單位編號與儲位名稱
                     SqlParameter[] parameters = new SqlParameter[]
                     {
@@ -425,6 +404,7 @@ namespace Automatic_Storage
                         dr["Create_Date"] = row["Create_Date"].ToString(); // 設定建立日期
                         dd.Rows.Add(dr); // 加入儲位資料表
                     }
+                    /* 儲位清單-查詢結果 */
                     dataGridView2.DataSource = dd; // 將儲位資料表繫結到 DataGridView 顯示
                 }
                 catch (Exception ex)
@@ -498,52 +478,67 @@ namespace Automatic_Storage
             }
         }
         /// <summary>
-        /// 刪除儲位資料。
-        /// - 目前為「不驗證」版本，直接依據選取列的序號刪除儲位。
-        /// - 保留「有驗證」版本註解，未啟用：可檢查明細表是否尚有資料，若有則不允許刪除。
+        /// 儲位清單-查詢結果--dataGridView2--刪除儲位資料。
+        /// 驗證儲位明細是否有庫存量 > 0：
+        /// - 若存在庫存 → 顯示警告「要刪除的儲位尚有材料，不允許刪除作業」
+        /// - 若無庫存 → 顯示確認對話框「是否確定刪除此儲位?」，使用者確認後方可刪除。
+        /// By Jesse 20251127
         /// </summary>
         private void delete_Click()
         {
-            #region 刪除不驗證 for 小鄭 20210522
-            // 取得目前選取列的儲位序號
-            string id = dataGridView2.CurrentRow?.Cells[2].Value?.ToString() ?? string.Empty;
-            // 建立刪除儲位的 SQL 語句
-            string strsql = @"delete Automatic_Storage_Position where sno=@sno";
-            SqlParameter[] sqlParameters = new SqlParameter[]
+            try
             {
-                new SqlParameter("sno",id)
-            };
-            // 執行刪除儲位
-            db.ExecueNonQuery(strsql, CommandType.Text, sqlParameters);
-            // 重新繫結儲位資料表
-            dataBind();
-            #endregion
+                /* Ada 提出要防呆
+                 * 1.若存在庫存 → 顯示警告「要刪除的儲位尚有材料，不允許刪除作業」
+                 * 2.若無庫存 → 顯示確認對話框「是否確定刪除此儲位?」，使用者確認後方可刪除。
+                 */
+                // 取得目前選取列的儲位名稱與序號
+                string position = dataGridView2.Rows[dataGridView2.CurrentRow.Index].Cells[5].Value.ToString();
+                string id = dataGridView2.Rows[dataGridView2.CurrentRow.Index].Cells[2].Value.ToString();
 
-            #region 刪除有驗證 保留版
-            // 確認明細表中該儲位是否尚有資料，若有則不允許刪除
-            //string position = dataGridView2.Rows[dataGridView2.CurrentRow.Index].Cells[5].Value.ToString();
-            //string sql_detail = @"select * from Automatic_Storage_Detail where Position=@position";
-            //SqlParameter[] parm_detail = new SqlParameter[]
-            //{
-            //        new SqlParameter("position",position)
-            //};
-            //DataSet dataSet = db.ExecuteDataSet(sql_detail, CommandType.Text, parm_detail);
-            //if (dataSet.Tables[0].Rows.Count == 0)
-            //{
-            //    string id = dataGridView2.Rows[dataGridView2.CurrentRow.Index].Cells[2].Value.ToString();
-            //    string strsql = @"delete Automatic_Storage_Position where sno=@sno";
-            //    SqlParameter[] sqlParameters = new SqlParameter[]
-            //    {
-            //        new SqlParameter("sno",id)
-            //    };
-            //    db.ExecueNonQuery(strsql, CommandType.Text, sqlParameters);
-            //    dataBind();
-            //}
-            //else
-            //{
-            //    MessageBox.Show("儲位尚有資料,請確認後再刪除");
-            //}
-            #endregion
+                // 查詢該儲位的庫存總量
+                string sql = @"SELECT SUM(CAST(ISNULL(Amount, 0) AS INT)) as TotalAmount 
+                              FROM Automatic_Storage_Position a
+                              LEFT JOIN Automatic_Storage_Detail b ON b.Position = a.Position
+                              WHERE a.Position = @position";
+                SqlParameter[] parms = new SqlParameter[]
+                {
+                    new SqlParameter("position", position)
+                };
+
+                DataTable dt = db.ExecuteDataTable(sql, CommandType.Text, parms);
+
+                // 檢查庫存量
+                int totalAmount = 0;
+                if (dt.Rows.Count > 0 && dt.Rows[0][0] != DBNull.Value)
+                {
+                    totalAmount = Convert.ToInt32(dt.Rows[0][0]);
+                }
+
+                // 根據庫存量決定是否允許刪除
+                if (totalAmount > 0)
+                {
+                    MessageBox.Show("要刪除的儲位尚有材料，不允許刪除作業", "刪除失敗", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+                else
+                {
+                    DialogResult result = MessageBox.Show("是否確定刪除此儲位?", "確認刪除", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                    if (result == DialogResult.Yes)
+                    {
+                        string deleteSql = @"DELETE FROM Automatic_Storage_Position WHERE sno = @sno";
+                        SqlParameter[] deleteParams = new SqlParameter[]
+                        {
+                            new SqlParameter("sno", id)
+                        };
+                        db.ExecueNonQuery(deleteSql, CommandType.Text, deleteParams);
+                        dataBind();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("刪除儲位時發生錯誤: " + ex.Message, "錯誤", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
         }
 
         /// <summary>
@@ -576,7 +571,7 @@ namespace Automatic_Storage
             // 將查詢結果逐筆加入 checkedListBox1
             foreach (DataRow row in ds.Tables[0].Rows)
             {
-                checkedListBox1.Items.Add(new MyItem(row["ROLE_NAME"].ToString(), row["ROLE_ID"].ToString()));
+                checkedListBox1.Items.Add(new MyItemDto(row["ROLE_NAME"].ToString(), row["ROLE_ID"].ToString()));
             }
         }
 
@@ -605,7 +600,7 @@ namespace Automatic_Storage
                     // 若人員尚未有權限，則逐一新增選取的權限
                     for (int i = 0; i < checkedListBox1.Items.Count; i++)
                     {
-                        MyItem item = (MyItem)this.checkedListBox1.Items[i];
+                        MyItemDto item = (MyItemDto)this.checkedListBox1.Items[i];
 
                         // 檢查該項目是否被選取
                         if (checkedListBox1.GetItemChecked(i))
@@ -805,6 +800,18 @@ namespace Automatic_Storage
         }
 
         /// <summary>
+        /// 建立檔案選擇對話框
+        /// 檔案選擇對話框，僅允許選擇 .xls .xlsm 格式的檔案。
+        /// </summary>
+        private OpenFileDialog fileDialog = new OpenFileDialog()
+        {
+            FileName = "Select an Excel file",
+            // 支援同時選取 .xlsx 和 .xls
+            Filter = "Excel 檔案 (*.xlsx;*.xls)|*.xlsx;*.xls|所有檔案 (*.*)|*.*",
+            Title = "Open Excel file"
+        };
+
+        /// <summary>
         /// 主視窗載入事件。
         /// 初始化窗體尺寸資訊，並設定所有控制項的 Tag 屬性以便後續縮放。
         /// 同時初始化檔案選擇對話框，僅允許選擇 .xls 格式的檔案。
@@ -819,13 +826,6 @@ namespace Automatic_Storage
             isLoaded = true;// 已設定各控制項的尺寸到Tag屬性中
             SetTag(this);//調用方法
             #endregion
-
-            fileDialog1 = new OpenFileDialog()
-            {
-                FileName = "Select a text file",
-                Filter = "Text files (*.xls)|*.xls",
-                Title = "Open text file"
-            };
         }
 
         /// <summary>
@@ -901,11 +901,6 @@ namespace Automatic_Storage
         }
 
         /// <summary>
-        /// 檔案選擇對話框，僅允許選擇 .xls 格式的檔案。
-        /// </summary>
-        private OpenFileDialog fileDialog1;
-
-        /// <summary>
         /// 檔案選擇按鈕事件處理函式。<br/>
         /// 開啟檔案選擇對話框，選擇 Excel 檔案後，將檔案複製到指定目錄，並更新路徑顯示於 txt_path。<br/>
         /// 同時重新繫結儲位資料表。
@@ -915,12 +910,12 @@ namespace Automatic_Storage
         private void selectButton_Click(object sender, EventArgs e)
         {
             // 顯示檔案選擇對話框
-            if (fileDialog1.ShowDialog() == DialogResult.OK)
+            if (fileDialog.ShowDialog() == DialogResult.OK)
             {
                 try
                 {
                     // 取得選取的檔案名稱
-                    var fileName = fileDialog1.FileName;
+                    var fileName = fileDialog.FileName;
 
                     // 取得選取的檔案目錄
                     FileInfo _info = new FileInfo(fileName);
@@ -983,42 +978,74 @@ namespace Automatic_Storage
         /// <param name="filename">Excel 檔案完整路徑</param>
         private void LoadExcel(string filename)
         {
-            if (filename != "")
+            if (!string.IsNullOrEmpty(filename))
             {
-                #region office 97-2003
-                string excelString = "Provider=Microsoft.Jet.OLEDB.4.0;" +
-                                    "Data Source=" + filename + ";" +
-                                    "Extended Properties='Excel 8.0;HDR=Yes;IMEX=1\'";
-                #endregion
+                try
+                {
+                    // NPOI 讀取 Excel (支援 .xls, .xlsx)
+                    using var fs = new FileStream(filename, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                    IWorkbook workbook;
+                    string ext = Path.GetExtension(filename).ToLowerInvariant();
+                    if (ext == ".xls")
+                    {
+                        workbook = new HSSFWorkbook(fs);
+                    }
+                    else if (ext == ".xlsx")
+                    {
+                        workbook = new XSSFWorkbook(fs);
+                    }
+                    else
+                    {
+                        throw new NotSupportedException($"不支援的 Excel 副檔名: {ext}");
+                    }
 
-                #region office 2007
-                //string excelString = "Provider=Microsoft.ACE.OLEDB.12.0;Data Source=" + filename +
-                //                 ";Extended Properties='Excel 12.0 Xml;HDR=YES;IMEX=1';";
-                #endregion
+                    var sheet = workbook.GetSheetAt(0);
+                    var dt = new DataTable();
 
-                OleDbConnection cnn = new OleDbConnection(excelString);
-                cnn.Open();
-                OleDbCommand cmd = new OleDbCommand();
-                cmd.Connection = cnn;
-                OleDbDataAdapter adapter = new OleDbDataAdapter();
-                cmd.CommandText = "SELECT * FROM [Sheet1$]";
-                adapter.SelectCommand = cmd;
-                //DataSet dsData = new DataSet();
-                adapter.Fill(dsData);
-                cnn = null;
-                cmd = null;
-                adapter = null;
+                    // 取得標題列
+                    var headerRow = sheet.GetRow(sheet.FirstRowNum);
+                    int cellCount = headerRow.LastCellNum;
+                    for (int i = 0; i < cellCount; i++)
+                    {
+                        var cell = headerRow.GetCell(i);
+                        dt.Columns.Add(cell?.ToString() ?? $"Column{i + 1}");
+                    }
+
+                    // 讀取資料列
+                    for (int i = sheet.FirstRowNum + 1; i <= sheet.LastRowNum; i++)
+                    {
+                        var row = sheet.GetRow(i);
+                        if (row == null) continue;
+                        var dataRow = dt.NewRow();
+                        for (int j = 0; j < cellCount; j++)
+                        {
+                            var cell = row.GetCell(j);
+                            dataRow[j] = cell?.ToString() ?? string.Empty;
+                        }
+                        dt.Rows.Add(dataRow);
+                    }
+
+                    dsData = new DataSet();
+                    dsData.Tables.Add(dt);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show("讀取 Excel 檔案失敗：" + ex.Message);
+                    return;
+                }
             }
             else
             {
                 MessageBox.Show("請選擇檔案");
+                return;
             }
+
         }
 
         /// <summary>
         /// 將 Excel 資料寫入 Automatic_Storage_Spec 資料表。
         /// 1. 逐筆讀取 dsData 的每一列，取得料號、客戶料號、規格。
-        /// 2. 若三者皆為空則記錄失敗訊息。
+        /// /// 2. 若三者皆為空則記錄失敗訊息。
         /// 3. 若資料存在，先查詢資料表是否已有該料號。
         ///    - 若已存在則更新規格與客戶料號。
         ///    - 若不存在則新增一筆資料。
