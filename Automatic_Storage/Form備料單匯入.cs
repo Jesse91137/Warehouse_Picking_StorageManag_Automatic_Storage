@@ -1,25 +1,27 @@
-using System;
-using System.Collections.Generic;
-using System.Configuration;
-using System.Data;
-using System.Data.SqlClient;
-using System.Drawing;
-using System.IO;
-using System.Linq;
-using System.Runtime.InteropServices;
-using System.Threading;
-using System.Threading.Tasks;
-using System.Windows.Forms;
-using Excel = Microsoft.Office.Interop.Excel;
+using Automatic_Storage.Dto;
+using Automatic_Storage.Services;
+using Automatic_Storage.Utilities;
+using NPOI.HSSF.UserModel;
 // NPOI for fast .xls/.xlsx reading (avoids COM)
 using NPOI.SS.UserModel;
 using NPOI.XSSF.UserModel;
-using NPOI.HSSF.UserModel;
-using static Automatic_Storage.Utilities.TextParsing;
+using System.Configuration;
+using System;
+using System.Diagnostics;
+using System.Collections.Generic;
+using System.Data;
+using System.Drawing;
+using System.IO;
+using System.Linq;
+using System.Text.RegularExpressions;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Windows.Forms;
 using static Automatic_Storage.Utilities.ComInterop;
-using Automatic_Storage.Services;
-using Automatic_Storage.Utilities;
-using Automatic_Storage.Dto;
+using static Automatic_Storage.Utilities.TextParsing;
+using Excel = Microsoft.Office.Interop.Excel;
+
+#nullable enable
 
 namespace Automatic_Storage
 {
@@ -142,9 +144,7 @@ namespace Automatic_Storage
         private Dictionary<string, int>? _columnMapping = null;
         /// <summary>
         /// Excel 服務物件，允許外部注入以便測試或替換實作（可為 null）。
-        /// 若有自訂 Excel 操作服務，可透過此欄位注入。
         /// </summary>
-        // allow dynamic excel service to be nullable; we guard assignments and uses
         private dynamic? _excelService = null;
         /// <summary>
         /// 可選的 Typed Excel service（優先使用）。若為 null，會回退到舊有 dynamic 物件的 adapter。
@@ -202,10 +202,10 @@ namespace Automatic_Storage
         /// 操作者
         /// </summary>
         private string operatorName = "";
-
-        /// <summary>
-        /// Excel 回寫相關佇列/同步控制
-        /// </summary>
+        // 追蹤目前表單所在的顯示器（DeviceName），用於偵測跨螢幕移動並調整大小
+        private string? _lastScreenDeviceName = null;
+        // 上一次紀錄的工作區大小（供比對用）
+        private Rectangle _lastScreenWorkingArea = Rectangle.Empty;
         private CancellationTokenSource? _excelQueueCts = null;
 
         /// <summary>
@@ -293,35 +293,125 @@ namespace Automatic_Storage
         private List<string>? _lastHiddenHeaders = new List<string>();
 
         // 畫面層的編輯鎖定：控制哪些欄位在 UI 上可編輯（不影響 Excel 檔案的保護狀態）
-        // 注意：_isEditingLocked 的語義是「是否鎖定」
+        // 注意：_isEditingLocked 的語義是「是否鎖定"
         // 初始值：true = 鎖定狀態（按鈕顯「解鎖」，匯出、存檔不可按）
         private bool _isEditingLocked = true;
+
+        // 抑制下一次料號欄位 Enter 事件顯示提示的旗標（用於避免程式性 Focus 觸發提示）
+        // 用法：在程式性流程中（例如套用數量後）將此旗標設為 true，下一次進入料號欄位的 Enter 處理器會消費此旗標並不顯示提示
+        private bool _suppressNextTxt料號EnterPrompt = false;
 
         /// <summary>
         /// 儲存編輯前的儲存格值以便在驗證失敗時還原
         /// </summary>
         private Dictionary<string, object?> _dgvCellPrevValues = new Dictionary<string, object?>();
+
+        // 臨時解除備註欄 ReadOnly 用的快取（key 為 欄位 index, value 為原本的 ReadOnly）
+        private Dictionary<int, bool> _tempColumnOrigReadOnly = new Dictionary<int, bool>();
+        // 臨時解除資料表 DataColumn ReadOnly 的快取（key 為 DataColumn.ColumnName, value 為原本的 ReadOnly）
+        private Dictionary<string, bool> _tempDataColumnOrigReadOnly = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        // 正在以雙擊進入編輯的暫存儲存格集合 (row_col)
+        private HashSet<string> _remarkTempEditingCells = new HashSet<string>();
+        // 臨時儲存被編輯時的 cell 原始背景色，key = "{row}_{col}"
+        private Dictionary<string, System.Drawing.Color> _tempCellOrigBackColors = new Dictionary<string, System.Drawing.Color>(StringComparer.OrdinalIgnoreCase);
+        // 臨時解除整個 DataGridView.ReadOnly 的快取（null 表示沒有臨時改動）
+        private bool? _tempGridOrigReadOnly = null;
+        // 備註欄每隔多少字自動換行（中文字視為一字），預設 25
+        private const int REMARK_WRAP_CHARS = 25;
+        // Progressive UI load to avoid rendering all rows at once for very large data sets
+        private const int UI_INITIAL_ROWS = 500;
+        private const int UI_CHUNK_SIZE = 2000;
+        private bool _enableProgressiveUiLoad = true;
+
         #endregion
 
+        // === Log 自動清理排程 ===
+        private System.Windows.Forms.Timer? _logClearTimer = null;
+        private bool _logClearedThisWeek = false;
 
         /// <summary>
-        /// Initializes a new instance of the <see cref="Form備料單匯入"/> class.
-        /// 建構子：確保 <see cref="InitializeComponent"/> 被呼叫，並啟動必要的背景工作。
+        /// 初始化每週一 12:30 執行的 log 清理排程
         /// </summary>
-        /// <param name="excelService">可選的 Excel 服務，允許外部注入以便測試或替換實作，可為 <see langword="null"/>。</param>
-        /// <param name="userNotifier">可選的使用者通知器，用於顯示訊息。若為 null 則建立預設 WinForms 實作。</param>
-        #region Constructor & Initialization
-        /// <summary>
-        /// 建構子：初始化表單元件並設定必要的服務。
-        /// - 參數 <c>excelService</c> 為選用的 Excel 服務（允許 null，用於測試或替換實作），目前以 dynamic 接受以維持相容性。
-        /// - 參數 <c>userNotifier</c> 為顯示訊息的使用者通知器，若為 null 則建立預設的 WinForms 實作。
-        /// 此建構子僅進行元件初始化與欄位預設值設定，避免執行長時間工作的同步作業。
-        /// </summary>
-        /// <param name="excelService">可選的 Excel 服務實作（允許 null）。</param>
-        /// <param name="userNotifier">用於顯示訊息的使用者通知器，若為 null 會建立預設實作。</param>
-        public Form備料單匯入(dynamic? excelService = null, IUserNotifier? userNotifier = null)
+        private void InitLogClearTimer()
         {
-            InitCommon(excelService, userNotifier);
+            _logClearTimer = new System.Windows.Forms.Timer();
+            _logClearTimer.Interval = 60 * 1000; // 每分鐘檢查一次
+            _logClearTimer.Tick += LogClearTimer_Tick;
+            _logClearTimer.Start();
+        }
+
+        /// <summary>
+        /// Timer Tick 事件：每分鐘檢查是否到週一 12:30，並執行 log 清理
+        /// </summary>
+        private void LogClearTimer_Tick(object? sender, EventArgs e)
+        {
+            DateTime now = DateTime.Now;
+            if (now.DayOfWeek == DayOfWeek.Monday && now.Hour == 12 && now.Minute == 30)
+            {
+                if (!_logClearedThisWeek)
+                {
+                    try
+                    {
+                        ClearAndBackupLogs();
+                        _logClearedThisWeek = true;
+                    }
+                    catch { /* 可於此處記錄錯誤 */ }
+                }
+            }
+            else if (now.DayOfWeek != DayOfWeek.Monday)
+            {
+                _logClearedThisWeek = false;
+            }
+        }
+
+        /// <summary>
+        /// 備份並清空 logs 目錄下所有 .log 檔案，僅保留一週備份，並於主 log 記錄
+        /// </summary>
+        private void ClearAndBackupLogs()
+        {
+            string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+            string logsDir = Path.Combine(baseDir, "Debug", "logs");
+            if (!Directory.Exists(logsDir)) return;
+
+            // 取得所有 .log 檔案
+            var logFiles = Directory.GetFiles(logsDir, "*.log");
+            foreach (var logFile in logFiles)
+            {
+                string fileName = Path.GetFileNameWithoutExtension(logFile);
+                string ext = Path.GetExtension(logFile);
+                string backupName = $"{fileName}.bak_{DateTime.Now:yyyyMMdd}{ext}";
+                string backupPath = Path.Combine(logsDir, backupName);
+
+                // 備份
+                File.Copy(logFile, backupPath, true);
+
+                // 清空原始 log
+                File.WriteAllText(logFile, "");
+
+                // 寫入主 log 註記
+                if (fileName.StartsWith("application_"))
+                {
+                    string logLine = $"[INFO] {DateTime.Now:yyyy-MM-dd HH:mm:ss} 已自動清空 log 並備份為 {backupName}";
+                    File.AppendAllText(logFile, logLine + Environment.NewLine);
+                }
+            }
+
+            // 僅保留一週內備份，刪除更舊的備份
+            var bakFiles = Directory.GetFiles(logsDir, "*.bak_*.log");
+            var weekAgo = DateTime.Now.AddDays(-7);
+            foreach (var bak in bakFiles)
+            {
+                string bakFile = Path.GetFileName(bak);
+                // 解析日期
+                var parts = bakFile.Split(new[] { ".bak_", ".log" }, StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length >= 2 && DateTime.TryParseExact(parts[1], "yyyyMMdd", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out DateTime bakDate))
+                {
+                    if (bakDate < weekAgo.Date)
+                    {
+                        try { File.Delete(bak); } catch { }
+                    }
+                }
+            }
         }
 
         /// <summary>
@@ -334,6 +424,883 @@ namespace Automatic_Storage
             // 呼叫共用初始化（使用 dynamic 參數以維持與舊有 dynamic 路徑相容）
             InitCommon((dynamic?)excelService, userNotifier);
             try { _typedExcelService = excelService; } catch { }
+            InitLogClearTimer();
+        }
+
+        #region Click Events
+        /// <summary>
+        /// 事件處理：使用者按下「匯入檔案」按鈕。
+        /// 此方法會以非同步方式開啟檔案選擇對話方塊，並啟動 Excel 讀取與解析流程。
+        /// 注意：此處僅負責啟動與協調，實際解析會在背景作業或分離方法中執行以避免阻塞 UI。
+        /// </summary>
+        /// <param name="sender">事件來源（按鈕）。</param>
+        /// <param name="e">事件參數。</param>
+        private async void btn備料單匯入檔案_Click(object sender, EventArgs e)
+        {
+            // 防呆：避免重入
+            if (_isImporting) // 如果正在匯入，則不允許重複操作
+            {
+                try { MessageBox.Show("目前已有匯入作業在進行中，請稍後再試。", "提醒", MessageBoxButtons.OK, MessageBoxIcon.Information); } catch { }
+                return; // 結束方法
+            }
+
+            // 【關鍵】在最外層先保存遊標狀態，便於在 finally 中還原
+            Cursor prevCursor = Cursor.Current; // 儲存目前游標
+            bool prevUseWaitCursor = Application.UseWaitCursor; // 儲存目前等待游標狀態
+
+            _isImporting = true; // 設定匯入中旗標
+            UpdateButtonStates(); // 更新按鈕狀態
+            try
+            {
+                // 邏輯：按下匯入檔案時，先解鎖 UI，避免按鈕無法還原
+                _keepImportButtonDisabledUntilClose = false; // 允許匯入按鈕還原
+
+                using (OpenFileDialog ofd = new OpenFileDialog()) // 建立檔案選擇對話框
+                {
+                    ofd.Filter = "Excel 檔案|*.xls;*.xlsx;*.xlsm|All files|*.*"; // 設定檔案過濾器
+                    ofd.Title = "選擇備料單 Excel 檔案"; // 設定標題
+                    ofd.Multiselect = false; // 不允許多選
+
+                    if (ofd.ShowDialog() != DialogResult.OK) return; // 若未選擇檔案則結束
+                    string path = ofd.FileName; // 取得檔案路徑
+
+                    // 【修正】每次匯入前先清空 UI 與暫存，避免資料累加
+                    try
+                    {
+                        // 解除綁定並清除舊資料
+                        if (this.dgv備料單 != null)
+                        {
+                            try { this.dgv備料單.DataSource = null; } catch { }
+                            try { this.dgv備料單.Rows.Clear(); } catch { }
+                            try { this.dgv備料單.Refresh(); } catch { }
+                        }
+
+                        // 清除內部暫存與狀態
+                        try { _currentUiTable = null; } catch { }
+                        try { _records?.Clear(); } catch { }
+                        try { _lastAppendedRecords?.Clear(); } catch { }
+                        try { _lastMatchedRows?.Clear(); } catch { }
+                        try { _materialIndex?.Clear(); } catch { }
+                        try { _preservedRedKeys?.Clear(); } catch { }
+                        try { _isDirty = false; } catch { }
+                    }
+                    catch { }
+
+                    // 鎖定 UI 並顯示等待遮罩
+                    try { try { _cts?.Cancel(); } catch { } _cts = new CancellationTokenSource(); } catch { }
+                    try { SaveAndDisableAllButtons(); } catch { }
+                    try { SetControlEnabledSafe(this.btn備料單返回, false); } catch { }
+                    try { SetControlEnabledSafe(this.btn備料單Unlock, false); } catch { }
+                    try { SetControlEnabledSafe(this.btn備料單匯出, false); } catch { }
+                    try { SetControlEnabledSafe(this.btn備料單存檔, false); } catch { }
+                    Stopwatch? swImport = null;
+                    try { ShowOperationOverlay(); } catch { }
+                    try { swImport = Stopwatch.StartNew(); } catch { }
+                    try { _prevUseWaitCursor = Application.UseWaitCursor; Application.UseWaitCursor = true; } catch { }
+                    try { Cursor.Current = Cursors.WaitCursor; } catch { }
+
+                    // 讓 UI 有機會顯示等待狀態
+                    try { this.Refresh(); Application.DoEvents(); } catch { }
+                    try { await Task.Yield(); } catch { }
+
+                    // 初始化記錄容器
+                    _records = new List<Dto.記錄Dto>();
+                    _records = new List<Dto.記錄Dto>();
+                    try { try { _cts?.Cancel(); } catch { } _cts = new CancellationTokenSource(); } catch { }
+
+                    DataTable? uiTable = null; // 宣告資料表
+                    Exception? loadEx = null; // 宣告例外
+                    // variables used across streaming / synchronous read paths
+                    bool canStream = false;
+                    bool usedStreaming = false;
+                    DataTable? fullTable = null;
+                    DataTable? visibleTable = null;
+                    Exception? streamingEx = null;
+                    try
+                    {
+                        // 使用注入型 IExcelService 讀取 Excel
+                        var sw = Stopwatch.StartNew();
+                        // If NPOI streaming is applicable, use the streaming loader to obtain the first batch quickly and bind it.
+                        var ext = Path.GetExtension(path)?.ToLowerInvariant() ?? string.Empty;
+                        bool preferNpoiForXlsm = false;
+                        try { preferNpoiForXlsm = (ConfigurationManager.AppSettings["PreferNpoiForXlsm"] ?? string.Empty).ToLowerInvariant() == "true"; } catch { preferNpoiForXlsm = false; }
+                        canStream = ext == ".xlsx" || ext == ".xls" || (ext == ".xlsm" && preferNpoiForXlsm);
+                        usedStreaming = canStream;
+                        if (canStream)
+                        {
+                            var firstBatchTcs = new TaskCompletionSource<bool>();
+                            try
+                            {
+                                // Launch streaming in background to avoid blocking UI
+                                var _token = _cts?.Token ?? CancellationToken.None;
+                                _ = Task.Run(() =>
+                                {
+                                    try
+                                    {
+                                        ExcelInteropHelper.LoadFirstWorksheetToDataTableStreaming(path, (batch) =>
+                                        {
+                                            if (batch == null || batch.Rows.Count == 0) return;
+                                            lock (this)
+                                            {
+                                                if (fullTable == null) fullTable = batch.Clone();
+                                                foreach (DataRow r in batch.Rows) fullTable.ImportRow(r);
+                                                if (!firstBatchTcs.Task.IsCompleted)
+                                                {
+                                                    // create visible table and bind the initial subset
+                                                    visibleTable = fullTable.Clone();
+                                                    int initial = Math.Min(UI_INITIAL_ROWS, fullTable.Rows.Count);
+                                                    for (int i = 0; i < initial; i++) visibleTable.ImportRow(fullTable.Rows[i]);
+                                                    SafeBeginInvoke(this, () =>
+                                                    {
+                                                        try { if (this.dgv備料單 != null) this.dgv備料單.DataSource = visibleTable; } catch { }
+                                                    });
+                                                    firstBatchTcs.TrySetResult(true);
+                                                }
+                                            }
+                                        }, UI_CHUNK_SIZE);
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        streamingEx = ex; firstBatchTcs.TrySetResult(true);
+                                    }
+                                }, _token);
+                            }
+                            catch (Exception ex)
+                            {
+                                // fall back to synchronous path
+                                streamingEx = ex;
+                            }
+                            // Wait briefly for the first batch to bind so UI can show result quickly
+                            try { await Task.WhenAny(firstBatchTcs.Task, Task.Delay(2000)); } catch { }
+                            // if streaming failed, fall back to synchronous loader (run in background to avoid UI block)
+                            if (streamingEx != null)
+                            {
+                                try { fullTable = await Task.Run(() => GetExcelService().LoadFirstWorksheetToDataTable(path)); } catch (Exception ex) { streamingEx = ex; }
+                            }
+                            // Do not block waiting for entire stream - allow background processing to continue.
+                            uiTable = fullTable; // may be null until streaming completes; visibleTable holds initial rows for UI
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        loadEx = ex; // 捕捉其他例外
+                    }
+
+                    if (loadEx != null) // 若有例外則顯示錯誤訊息
+                    {
+                        SafeBeginInvoke(this, new Action(() =>
+                        {
+                            MessageBox.Show($"Excel 讀取失敗：{loadEx.Message}", "錯誤", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                            this.currentExcelPath = null;
+                            try { Application.UseWaitCursor = _prevUseWaitCursor; } catch { }
+                            try { Cursor.Current = Cursors.Default; } catch { }
+                            try { HideOperationOverlay(); } catch { }
+                            try { RestoreAllButtons(); } catch { }
+                        }));
+                        return;
+                    }
+
+                    if (uiTable == null || uiTable.Rows.Count == 0) // 若無資料則顯示警告
+                    {
+                        SafeBeginInvoke(this, new Action(() =>
+                        {
+                            MessageBox.Show("讀取檔案後未取得資料。", "匯入失敗", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                            this.currentExcelPath = null;
+                            try { Application.UseWaitCursor = _prevUseWaitCursor; } catch { }
+                            try { Cursor.Current = Cursors.Default; } catch { }
+                            try { HideOperationOverlay(); } catch { }
+                            try { RestoreAllButtons(); } catch { }
+                        }));
+                        return;
+                    }
+
+                    // 處理 Excel 隱藏欄位與公式
+                    // 如果使用 streaming （可提供快速首批顯示），將在背景對 fullTable 做隱藏欄位移除與公式替換
+                    // usedStreaming already declared earlier
+                    if (!usedStreaming)
+                    {
+                        // 將隱藏欄位處理移到背景執行，避免在 UI 執行緒阻塞
+                        try
+                        {
+                            var swHidden = Stopwatch.StartNew();
+                            await Task.Run(() => ExcelInteropHelper.RemoveHiddenColumnsFromDataTable(path, uiTable));
+                            swHidden.Stop();
+                            try { _ = Task.Run(() => Automatic_Storage.Utilities.Logger.LogInfoAsync($"RemoveHiddenColumnsFromDataTable: elapsed={swHidden.ElapsedMilliseconds}ms")); } catch { }
+                        }
+                        catch { }
+
+                        // 同步處理公式替換
+                        try
+                        {
+                            var swForm = Stopwatch.StartNew();
+                            await Task.Run(() => ReplaceFormulasWithValuesFromExcel(path, uiTable, _cts?.Token ?? CancellationToken.None));
+                            swForm.Stop();
+                            /*花費時間*/
+                            //try { _ = Task.Run(() => Automatic_Storage.Utilities.Logger.LogInfoAsync($"ReplaceFormulasWithValuesFromExcel: elapsed={swForm.ElapsedMilliseconds}ms")); } catch { }
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            SafeBeginInvoke(this, new Action(() =>
+                            {
+                                MessageBox.Show("匯入已被使用者取消。", "取消", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                                try { Application.UseWaitCursor = _prevUseWaitCursor; } catch { }
+                                try { Cursor.Current = Cursors.Default; } catch { }
+                                try { HideOperationOverlay(); } catch { }
+                                try { RestoreAllButtons(); } catch { }
+                            }));
+                            return;
+                        }
+                        catch (Exception ex)
+                        {
+                            SafeBeginInvoke(this, new Action(() =>
+                            {
+                                MessageBox.Show($"公式處理失敗：{ex.Message}", "錯誤", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                            }));
+                        }
+                    }
+                    else
+                    {
+                        // For streaming: process hidden columns and replace formulas in background, then swap DataSource to full table
+                        _ = Task.Run(async () =>
+                        {
+                            try
+                            {
+                                var swHidden = Stopwatch.StartNew();
+                                ExcelInteropHelper.RemoveHiddenColumnsFromDataTable(path, uiTable);
+                                swHidden.Stop();
+                                /*花費時間*/
+                                //try { _ = Task.Run(() => Automatic_Storage.Utilities.Logger.LogInfoAsync($"RemoveHiddenColumnsFromDataTable(background): elapsed={swHidden.ElapsedMilliseconds}ms")); } catch { }
+
+                                var swForm = Stopwatch.StartNew();
+                                await Task.Run(() => ReplaceFormulasWithValuesFromExcel(path, uiTable, _cts?.Token ?? CancellationToken.None));
+                                swForm.Stop();
+                                /*花費時間*/
+                                //try { _ = Task.Run(() => Automatic_Storage.Utilities.Logger.LogInfoAsync($"ReplaceFormulasWithValuesFromExcel(background): elapsed={swForm.ElapsedMilliseconds}ms")); } catch { }
+
+                                // After background processing, update UI table and columns
+                                SafeBeginInvoke(this, () =>
+                                {
+                                    try
+                                    {
+                                        if (this.dgv備料單 != null && uiTable != null)
+                                        {
+                                            RebuildGridColumnsFromDataTable(this.dgv備料單, uiTable);
+                                            this.dgv備料單.DataSource = uiTable;
+                                            try { this.dgv備料單?.Refresh(); } catch { }
+                                        }
+                                    }
+                                    catch { }
+                                });
+                            }
+                            catch (Exception ex)
+                            {
+                                try { _ = Task.Run(() => Automatic_Storage.Utilities.Logger.LogErrorAsync($"Background processing failed: {ex.Message}")); } catch { }
+                            }
+                        });
+                    }
+
+                    // 驗證欄位對應（如果使用 streaming，使用 visibleTable 先行驗證，避免等待完整載入）
+                    Dictionary<string, int> mapping;
+                    string errMsg;
+                    var swValidate = Stopwatch.StartNew();
+                    var tableToValidate = visibleTable ?? uiTable;
+                    if (!ValidateAndMapColumns(tableToValidate, out mapping, out errMsg))
+                    {
+                        SafeBeginInvoke(this, new Action(() =>
+                        {
+                            MessageBox.Show($"Excel 欄位對應失敗：{errMsg}", "錯誤", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        }));
+                        return;
+                    }
+                    swValidate.Stop();
+                    /*花費時間*/
+                    //try { _ = Task.Run(() => Automatic_Storage.Utilities.Logger.LogInfoAsync($"ValidateAndMapColumns: elapsed={swValidate.ElapsedMilliseconds}ms")); } catch { }
+                    this._columnMapping = mapping; // 儲存欄位對應
+
+                    // DataGridView 綁定
+                    try
+                    {
+                        try { if (this.dgv備料單 != null) { BeginUpdate(this.dgv備料單); SetDoubleBuffered(this.dgv備料單, true); } } catch { }
+                        try
+                        {
+                            if (this.dgv備料單 is not null)
+                            {
+                                this.dgv備料單.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.None;
+                            }
+                        }
+                        catch { }
+                        ResetGridBeforeBind(); // 重設欄位
+                        try
+                        {
+                            var swCols = Stopwatch.StartNew();
+                            if (this.dgv備料單 != null && uiTable != null) RebuildGridColumnsFromDataTable(this.dgv備料單, uiTable);
+                            swCols.Stop();
+                            /*花費時間*/
+                            //try { _ = Task.Run(() => Automatic_Storage.Utilities.Logger.LogInfoAsync($"RebuildGridColumnsFromDataTable: elapsed={swCols.ElapsedMilliseconds}ms")); } catch { }
+                        }
+                        catch { }
+                        try
+                        {
+                            var swBind = Stopwatch.StartNew();
+                            if (this.dgv備料單 != null)
+                            {
+                                var sourceForBind = visibleTable ?? uiTable;
+                                if (sourceForBind != null && _enableProgressiveUiLoad && sourceForBind.Rows.Count > UI_INITIAL_ROWS)
+                                {
+                                    // Only show initial subset for fast initial rendering
+                                    var visible = sourceForBind.Clone();
+                                    int initial = Math.Min(UI_INITIAL_ROWS, sourceForBind.Rows.Count);
+                                    for (int i = 0; i < initial; i++) visible.ImportRow(sourceForBind.Rows[i]);
+                                    this.dgv備料單.DataSource = visible;
+                                    // Append remaining rows in the background to avoid UI block
+                                    var ctoken = _cts?.Token ?? CancellationToken.None;
+                                    _ = Task.Run(async () => await AppendRemainingRowsToGrid(sourceForBind, visible, initial, ctoken));
+                                }
+                                else
+                                {
+                                    this.dgv備料單.DataSource = sourceForBind;
+                                }
+                            }
+                            try { this.dgv備料單?.Refresh(); } catch { }
+                            swBind.Stop();
+                            /*花費間*/
+                            //try { _ = Task.Run(() => Automatic_Storage.Utilities.Logger.LogInfoAsync($"DataSource bind & Refresh: elapsed={swBind.ElapsedMilliseconds}ms")); } catch { }
+                        }
+                        catch { }
+                        _currentUiTable = uiTable; // 快取目前資料表
+                        this.currentExcelPath = path; // 記錄目前檔案路徑
+                        // 標記為已接受變更，避免誤觸發未存檔提醒
+                        try { _suspendDirtyMarking = true; } catch { }
+                        try
+                        {
+                            try { uiTable?.AcceptChanges(); } catch { }
+                            try { _isDirty = false; } catch { }
+                            try { _records?.Clear(); } catch { }
+                            try { _lastAppendedRecords?.Clear(); } catch { }
+                        }
+                        finally
+                        {
+                            try { _suspendDirtyMarking = false; } catch { }
+                        }
+                        // 設定備註欄可編輯與雙擊事件
+                        try
+                        {
+                            if (this.dgv備料單 != null)
+                            {
+                                int remarkCol = FindColumnIndexByNames(new[] { "備註", "備註欄", "Remark" });
+                                if (remarkCol >= 0 && this.dgv備料單.Columns != null && remarkCol < this.dgv備料單.Columns.Count)
+                                {
+                                    try { this.dgv備料單.Columns[remarkCol].ReadOnly = false; } catch { }
+                                    try { this.dgv備料單.Columns[remarkCol].CellTemplate = new DataGridViewTextBoxCell(); } catch { }
+                                }
+                                try { this.dgv備料單.CellDoubleClick -= Dgv備料單_CellDoubleClick_StartEdit; } catch { }
+                                try { this.dgv備料單.CellDoubleClick += Dgv備料單_CellDoubleClick_StartEdit; } catch { }
+                            }
+                        }
+                        catch { }
+                        int shippedCol = FindColumnIndexByNames(new[] { "實發數量", "發料數量" });
+                        if (this.dgv備料單 is not null && shippedCol >= 0 && this.dgv備料單.Columns != null && shippedCol < this.dgv備料單.Columns.Count)
+                        {
+                            this.dgv備料單.Columns[shippedCol].DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleRight;
+                        }
+                        var postToken = _cts?.Token ?? CancellationToken.None;
+                        _ = UpdateExcelAfterImportAsync(this.currentExcelPath, postToken); // 匯入後更新 Excel
+                        try { if (this.dgv備料單 != null) EndUpdate(this.dgv備料單); } catch { }
+                        try { if (this.dgv備料單 != null) HideSelectionInGrid(this.dgv備料單); } catch { }
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show($"綁定資料時發生錯誤：{ex.Message}", "錯誤", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        this.currentExcelPath = null;
+                    }
+
+                    // UI 還原
+                    try { swImport?.Stop(); } catch { }
+                    /*花費時間*/
+                    //try { _ = Task.Run(() => Automatic_Storage.Utilities.Logger.LogInfoAsync($"Import total elapsed={swImport?.ElapsedMilliseconds ?? 0}ms, rows={(uiTable?.Rows?.Count ?? 0)}")); } catch { }
+                    try { HideOperationOverlay(); } catch { }
+                    try { RestoreAllButtons(); } catch { }
+                }
+            }
+            finally
+            {
+                // 還原游標和等待狀態
+                try { Application.UseWaitCursor = _prevUseWaitCursor; } catch { }
+                try { Cursor.Current = prevCursor; this.Cursor = Cursors.Default; } catch { }
+                try { HideOperationOverlay(); } catch { }
+
+                _isImporting = false; // 清除匯入中旗標
+                UpdateButtonStates(); // 更新按鈕狀態
+
+                // 匯入完成後自動切換回鎖定狀態
+                try { SetEditingLocked(true); } catch { }
+
+                // 確保備註欄可雙擊編輯
+                try
+                {
+                    SafeBeginInvoke(this, () =>
+                    {
+                        try
+                        {
+                            if (this.dgv備料單 != null)
+                            {
+                                int remarkCol = FindColumnIndexByNames(new[] { "備註", "備註欄", "Remark" });
+                                if (remarkCol >= 0 && this.dgv備料單.Columns != null && remarkCol < this.dgv備料單.Columns.Count)
+                                {
+                                    try { this.dgv備料單.Columns[remarkCol].ReadOnly = false; } catch { }
+                                    try { this.dgv備料單.CellDoubleClick -= Dgv備料單_CellDoubleClick_StartEdit; } catch { }
+                                    try { this.dgv備料單.CellDoubleClick += Dgv備料單_CellDoubleClick_StartEdit; } catch { }
+                                }
+                            }
+                        }
+                        catch { }
+                    });
+                }
+                catch { }
+                // 確保按鈕狀態正確
+                try { UpdateMainButtonsEnabled(); } catch { }
+            }
+        }
+
+        /// <summary>
+        /// 數量輸入框 KeyDown 事件: 按下 Enter 執行數量更新與累加邏輯
+        /// </summary>
+        private void Txt備料單數量_KeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.Enter)
+            {
+                e.SuppressKeyPress = true;
+                var qtyText = this.txt備料單數量.Text?.Trim();
+                // 診斷：記錄按下 Enter 時的游標/UseWaitCursor 狀態，方便追蹤殘留情況
+                // Enter pressed snapshot diagnostic removed
+
+                // 在焦點轉移前立即設置抑制旗標，防止料號欄位 Enter 事件誤觸提示
+                try { _suppressNextTxt料號EnterPrompt = true; } catch { }
+
+                ApplyQuantityToSelectedRow(qtyText);
+            }
+        }
+
+        /// <summary>
+        /// 數量輸入框 KeyPress 事件: 只允許輸入數字
+        /// </summary>
+        private void Txt備料單數量_KeyPress(object sender, KeyPressEventArgs e)
+        {
+            // 允許控制字元 (例如 Backspace, Delete)
+            if (char.IsControl(e.KeyChar)) return;
+
+            // 只允許數字,不允許其他字元(包括小數點、負號等)
+            if (!char.IsDigit(e.KeyChar))
+            {
+                e.Handled = true;
+            }
+        }
+
+        /// <summary>
+        /// 當料號輸入框取得焦點時，清除任何搜尋標示
+        /// </summary>
+        /// <param name="sender">The source of the event.</param>
+        /// <param name="e">The <see cref="EventArgs"/> instance containing the event data.</param>
+        private void Txt備料單料號_Enter(object sender, EventArgs e)
+        {
+            try
+            {
+                // 若上一個程式流程已設定要抑制下一次 Enter 提示，消費該旗標並不顯示
+                try
+                {
+                    if (_suppressNextTxt料號EnterPrompt)
+                    {
+                        _suppressNextTxt料號EnterPrompt = false;
+                        return;
+                    // 鎖定狀態下不做任何事，避免唯讀與提示誤觸發
+                    if (_isEditingLocked)
+                    {
+                        return;
+                    }
+                            try { if (this.btn備料單Unlock != null) this.btn備料單Unlock.Focus(); } catch { }
+                        
+                        return;
+                    }
+                }
+                catch { }
+
+                ClearRowHighlights();
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// 事件處理：使用者按下「匯出」按鈕。
+        /// 會以非同步方式匯出目前 DataGridView 的內容為外部檔案（例如 CSV/Excel），並在完成後回報狀態。
+        /// </summary>
+        /// <param name="sender">事件來源（按鈕）。</param>
+        /// <param name="e">事件參數。</param>
+        private async void btn備料單匯出_Click(object sender, EventArgs e)
+        {
+            // 防呆：避免重複執行匯出
+            if (_isExporting)
+            {
+                try { MessageBox.Show("目前已有匯出作業在進行中，請稍後再試。", "提醒", MessageBoxButtons.OK, MessageBoxIcon.Information); } catch { }
+                return;
+            }
+
+            // 檢查是否有可用的 Excel 檔案
+            if (!CheckExcelAvailable()) return;
+
+            _isExporting = true;
+            UpdateButtonStates();
+            _prevUseWaitCursor = Application.UseWaitCursor;
+            SaveAndDisableAllButtons();
+            ShowOperationOverlay("匯出中，請稍候...");
+            try
+            {
+                Application.UseWaitCursor = true;
+                Cursor.Current = Cursors.WaitCursor;
+
+                // 檢查是否需要先存檔的邏輯（保留原有判斷，但移入局部函式以提升可讀性）
+                async Task<bool> EnsureSavedIfNeededAsync()
+                {
+                    try
+                    {
+                        if (_isDirty) return await PromptSaveAsync();
+                        if (_records != null && _records.Count > 0) return await PromptSaveAsync();
+
+                        var dt = this.dgv備料單?.DataSource as DataTable;
+                        if (dt == null || !DataTableHasRealChanges(dt)) return true;
+
+                        // 檢查是否為使用者可編輯的重大變更（只查看發料/實發類欄位）
+                        var shippedSynonyms = new[] { "實發數量", "發料數量" };
+                        Func<string, string> San = SanitizeHeaderForMatch;
+                        var shippedNorms = new HashSet<string>(shippedSynonyms.Select(San));
+
+                        try
+                        {
+                            var changes = dt.GetChanges();
+                            if (changes != null)
+                            {
+                                foreach (DataColumn ch in changes.Columns)
+                                {
+                                    var colName = ch.ColumnName ?? string.Empty;
+                                    var colNorm = San(colName);
+                                    if (string.IsNullOrEmpty(colNorm)) continue;
+                                    if (!(shippedNorms.Contains(colNorm) || shippedNorms.Any(s => colNorm.Contains(s) || s.Contains(colNorm)))) continue;
+
+                                    foreach (DataRow r in changes.Rows)
+                                    {
+                                        object? orig = null, cur = null;
+                                        try { orig = r[colName, DataRowVersion.Original]; } catch { }
+                                        try { cur = r[colName, DataRowVersion.Current]; } catch { }
+                                        bool origEmpty = orig == null || orig == DBNull.Value || (orig is string os && string.IsNullOrWhiteSpace(os));
+                                        bool curEmpty = cur == null || cur == DBNull.Value || (cur is string cs && string.IsNullOrWhiteSpace(cs));
+                                        if (origEmpty && curEmpty) continue;
+                                        if (orig is string os2 && cur is string cs2)
+                                        {
+                                            if (!string.Equals(os2.Trim(), cs2.Trim(), StringComparison.Ordinal)) return await PromptSaveAsync();
+                                        }
+                                        else
+                                        {
+                                            if (!object.Equals(orig, cur)) return await PromptSaveAsync();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        catch { }
+
+                        // 若沒有找到使用者可編輯的變更，則不需存檔
+                        return true;
+                    }
+                    catch { return true; }
+                }
+
+                async Task<bool> PromptSaveAsync()
+                {
+                    var dr = MessageBox.Show("畫面有未存檔的變更，是否先存檔？\n(選是將先執行存檔，選否則直接繼續匯出)", "未存檔提醒", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+                    if (dr == DialogResult.Cancel) return false; // 代表取消整個匯出流程
+                    if (dr == DialogResult.Yes)
+                    {
+                        SaveResultDto? saveResult = null;
+                        try { saveResult = await SaveAsyncWithResult(); } catch (Exception ex) { saveResult = new SaveResultDto { Success = false, ErrorMessage = ex.Message }; }
+                        if (saveResult == null || !saveResult.Success)
+                        {
+                            var msg = "存檔失敗，已取消匯出。";
+                            if (!string.IsNullOrEmpty(saveResult?.ErrorMessage)) msg += "\n\n錯誤主因：" + saveResult?.ErrorMessage;
+                            MessageBox.Show(msg, "取消匯出", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                            return false;
+                        }
+                    }
+                    return true;
+                }
+
+                // 確認並（如需要）存檔
+                var okToContinue = await EnsureSavedIfNeededAsync();
+                if (!okToContinue) return; // finally 會處理還原
+
+                // 顯示另存新檔對話框並處理複製
+                using (var sfd = new SaveFileDialog())
+                {
+                    sfd.Title = "另存為...";
+                    sfd.Filter = "Excel 檔案 (*.xlsx;*.xlsm;*.xls)|*.xlsx;*.xlsm;*.xls|所有檔案 (*.*)|*.*";
+                    sfd.FileName = Path.GetFileName(this.currentExcelPath) ?? "export.xlsx";
+                    try { sfd.OverwritePrompt = false; } catch { }
+                    try { EnsureCursorRestored(); } catch { }
+                    if (sfd.ShowDialog(this) != DialogResult.OK) return;
+
+                    var dest = sfd.FileName;
+                    try
+                    {
+                        if (File.Exists(dest))
+                        {
+                            try
+                            {
+                                var fi = new FileInfo(dest);
+                                string sizeText = fi.Length >= 1024 ? (fi.Length >= 1024 * 1024 ? (fi.Length / (1024.0 * 1024.0)).ToString("F2") + " MB" : (fi.Length / 1024.0).ToString("F1") + " KB") : fi.Length + " bytes";
+                                string info = $"檔案已存在：{dest}\r\n大小：{sizeText}\r\n最後修改：{fi.LastWriteTime:yyyy/MM/dd HH:mm}\r\n是否要覆蓋？";
+                                var over = MessageBox.Show(info, "確認覆蓋", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+                                if (over != DialogResult.Yes) return;
+                            }
+                            catch
+                            {
+                                var over = MessageBox.Show($"檔案已存在：{dest}\n是否要覆蓋？", "確認覆蓋", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+                                if (over != DialogResult.Yes) return;
+                            }
+                        }
+
+                        File.Copy(this.currentExcelPath, dest, true);
+                        MessageBox.Show("已匯出檔案: " + dest, "匯出完成", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        // 標記匯出成功
+                        try { _keepUnlockButtonDisabledUntilClose = true; } catch { }
+                        try { SetControlEnabledSafe(this.btn備料單Unlock, false); } catch { }
+                        try { ResetFormState(); } catch { }
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show("匯出失敗: " + ex.Message, "錯誤", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("匯出失敗: " + ex.Message, "錯誤", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally
+            {
+                // 使用既有的還原函式保證一致性
+                try { EnsureUiFullyRestored(); } catch { }
+
+                try { if (this.dgv備料單 != null) { if (this.dgv備料單.IsCurrentCellInEditMode) this.dgv備料單.EndEdit(); try { this.dgv備料單.CancelEdit(); } catch { } try { this.dgv備料單.CurrentCell = null; } catch { } try { this.dgv備料單.ClearSelection(); } catch { } } } catch { }
+                try { SetEditingLocked(true); } catch { }
+                try { ClearMaterialIndex(); } catch { }
+
+                try { UpdateButtonStates(); } catch { }
+                try { UpdateMainButtonsEnabled(); } catch { }
+
+                try { this.Focus(); } catch { }
+                try { this.Activate(); } catch { }
+                try { NativeHelpers.ReleaseCapture(); } catch { }
+                try { Cursor.Hide(); Cursor.Show(); } catch { }
+                try { Application.DoEvents(); } catch { }
+            }
+        }
+
+        /// <summary>
+        /// 事件處理：使用者按下「返回」按鈕。
+        /// 此方法會關閉表單或回到上一層畫面，並在必要時清理臨時狀態。
+        /// </summary>
+        /// <param name="sender">事件來源（按鈕）。</param>
+        /// <param name="e">事件參數。</param>
+        private void btn備料單返回_Click(object sender, EventArgs e)
+        {
+            // 需求：返回只隱藏，不要重置目前表單資料；再次由主畫面開啟時，恢復同一個實例
+            try { RestoreAllButtons(); } catch { }
+            try { HideOperationOverlay(); } catch { }
+
+            // 隱藏目前視窗並回到 owner（不需驗證 Excel，避免在返回時出現異常）
+            try { this.Hide(); } catch { }
+            if (this.Owner is Form owner)
+            {
+                try { owner.Show(); owner.BringToFront(); owner.Activate(); } catch { }
+            }
+        }
+
+        /// <summary>
+        /// [事件] 備料單解鎖/鎖定按鈕點擊事件。
+        /// - 若目前為鎖定狀態，點擊後顯示密碼輸入對話框，驗證成功則解鎖（可編輯）；失敗或取消則維持鎖定。
+        /// - 若目前為解鎖狀態，點擊後直接鎖定（不可編輯）。
+        /// - 過程中會自動處理游標、UI 狀態與按鈕啟用狀態，避免重複操作或異常狀態殘留。
+        /// </summary>
+        /// <param name="sender">事件來源（按鈕控制項）。</param>
+        /// <param name="e">事件參數。</param>
+        private void btn備料單Unlock_Click(object sender, EventArgs e)
+        {
+            // 防呆：避免在其他操作進行時解鎖
+            if (_isImporting || _isExporting || _isSaving)
+            {
+                try { MessageBox.Show("目前有作業在進行中，請稍後再試。", "提醒", MessageBoxButtons.OK, MessageBoxIcon.Information); } catch { }
+                return;
+            }
+
+            // 暫時禁用解鎖按鈕，避免使用者重複點擊
+            try { SetControlEnabledSafe(this.btn備料單Unlock, false); } catch { }
+            // 不在顯示密碼輸入時使用等待游標或遮罩，避免阻塞使用者輸入
+            // 若有較長時間的背景工作再顯示 overlay / 等待游標
+
+            SafeBeginInvoke(this, new Action(() =>
+            {
+                try
+                {
+                    if (_isEditingLocked)
+                    {
+                        // 在顯示密碼輸入對話框前，確保游標與 UI 狀態已恢復（避免對話框出現時仍為等待游標）
+                        try { EnsureCursorRestored(); } catch { }
+
+                        // 需要密碼才能解鎖畫面編輯：使用可重試的對話框，錯誤時不自動關閉視窗
+                        string expected = GetExcelPassword();
+                        bool ok = PromptForPasswordWithRetry(expected);
+                        if (ok)
+                        {
+                            // 解鎖成功：設定為解鎖狀態（false = 解鎖）
+                            // SetEditingLocked() 內部會呼叫 UpdateMainButtonsEnabled() 更新所有按鈕狀態
+                            SetEditingLocked(false);
+                        }
+                        else
+                        {
+                            // 使用者取消或驗證失敗，不做任何變更，按鈕狀態保持原樣（鎖定狀態不變）
+                        }
+                    }
+                    else
+                    {
+                        // 已解鎖，點擊即鎖定（不需密碼）
+                        // SetEditingLocked() 內部會呼叫 UpdateMainButtonsEnabled() 更新所有按鈕狀態
+                        SetEditingLocked(true);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // Fire-and-forget log to avoid changing method signature; swallow any errors from logging
+                    try { _ = Task.Run(() => Utilities.Logger.LogErrorAsync("Unlock UI failed: " + ex.Message)); } catch { }
+                }
+                finally
+                {
+                    // 強制還原游標與 UI 狀態（使用強制還原而非回復 prev，避免 prev 在其他流程被改變導致殘留）
+                    try { Application.UseWaitCursor = false; } catch { }
+                    try { Cursor.Current = Cursors.Default; } catch { }
+                    try { this.Cursor = Cursors.Default; } catch { }
+                    try { EnsureCursorRestored(); } catch { }
+                    try { HideOperationOverlay(); } catch { }
+                    try { if (!_keepUnlockButtonDisabledUntilClose) SetControlEnabledSafe(this.btn備料單Unlock, true); } catch { }
+                }
+            }));
+        }
+        #endregion
+
+        #region Constructor & Initialization
+        /// <summary>
+        /// 建構子：初始化表單元件並設定必要的服務。
+        /// - 參數 <c>excelService</c> 為選用的 Excel 服務（允許 null，用於測試或替換實作），目前以 dynamic 接受以維持相容性。
+        /// - 參數 <c>userNotifier</c> 為顯示訊息的使用者通知器，若為 null 則建立預設的 WinForms 實作。
+        /// 此建構子僅進行元件初始化與欄位預設值設定，避免執行長時間工作的同步作業。
+        /// </summary>
+        /// <param name="excelService">可選的 Excel 服務實作（允許 null）。</param>
+        /// <param name="userNotifier">用於顯示訊息的使用者通知器，若為 null 會建立預設實作。</param>
+        public Form備料單匯入(dynamic? excelService = null, IUserNotifier? userNotifier = null)
+        {
+            InitCommon(excelService, userNotifier);
+            InitLogClearTimer();
+        }
+
+        /// <summary>
+        /// 還原臨時解除備註欄的 ReadOnly 與樣式（在 CellEndEdit 或取消時呼叫）
+        /// </summary>
+        /// <param name="rowIndex">列索引</param>
+        /// <param name="colIndex">欄索引</param>
+        private void RevertTemporaryRemarkEditAtCell(int rowIndex, int colIndex)
+        {
+            // 嘗試執行還原備註欄臨時編輯狀態
+            try
+            {
+                // 取得 DataGridView 物件
+                var dgv = this.dgv備料單;
+                // 若 DataGridView 為 null 則直接返回
+                // 若列或欄索引小於 0 則直接返回
+                if (rowIndex < 0 || colIndex < 0) return;
+                // 組合 key 作為暫存集合的索引
+                string key = rowIndex + "_" + colIndex;
+                // 若暫存集合中不包含此 key 則直接返回
+                if (!_remarkTempEditingCells.Contains(key)) return;
+                // 從暫存集合移除此 key
+                _remarkTempEditingCells.Remove(key);
+
+                try
+                {
+                    // 若 DataGridView 欄位存在且索引合法
+                    if (dgv.Columns != null && colIndex < dgv.Columns.Count)
+                    {
+                        try
+                        {
+                            // 若有暫存原本的 ReadOnly 狀態則還原
+                            if (_tempColumnOrigReadOnly.TryGetValue(colIndex, out bool orig))
+                            {
+                                try { dgv.Columns[colIndex].ReadOnly = orig; } catch { }
+                                try { _tempColumnOrigReadOnly.Remove(colIndex); } catch { }
+                            }
+                        }
+                        catch { }
+
+                        // 還原儲存格背景色，若有暫存則用原色，否則設為白色
+                        try
+                        {
+                            var cell = dgv.Rows[rowIndex].Cells[colIndex];
+                            if (cell != null)
+                            {
+                                try
+                                {
+                                    string k = rowIndex + "_" + colIndex;
+                                    if (_tempCellOrigBackColors != null && _tempCellOrigBackColors.TryGetValue(k, out var origCol))
+                                    {
+                                        try { cell.Style.BackColor = origCol; } catch { }
+                                        try { _tempCellOrigBackColors.Remove(k); } catch { }
+                                    }
+                                    else
+                                    {
+                                        try { cell.Style.BackColor = Color.White; } catch { }
+                                    }
+                                }
+                                catch { }
+                            }
+                        }
+                        catch { }
+
+                        // 還原對應 DataTable.DataColumn 的 ReadOnly 屬性
+                        try
+                        {
+                            var col = dgv.Columns[colIndex];
+                            var propName = col != null ? (!string.IsNullOrEmpty(col.DataPropertyName) ? col.DataPropertyName : col.Name) : null;
+                            if (!string.IsNullOrEmpty(propName) && dgv.DataSource is DataTable dt && dt.Columns.Contains(propName))
+                            {
+                                if (_tempDataColumnOrigReadOnly.TryGetValue(propName!, out bool dorig))
+                                {
+                                    try { dt.Columns[propName!].ReadOnly = dorig; } catch { }
+                                    try { _tempDataColumnOrigReadOnly.Remove(propName!); } catch { }
+                                }
+                            }
+                        }
+                        catch { }
+                    }
+                }
+                catch { }
+                // 若之前有暫時解除整個 DataGridView 的 ReadOnly，則在此還原
+                try
+                {
+                    if (_tempGridOrigReadOnly.HasValue)
+                    {
+                        try { dgv.ReadOnly = _tempGridOrigReadOnly.Value; } catch { }
+                        _tempGridOrigReadOnly = null;
+                    }
+                }
+                catch { }
+            }
+            catch { }
         }
 
         /// <summary>
@@ -360,9 +1327,263 @@ namespace Automatic_Storage
                     this.dgv備料單.CellBeginEdit += Dgv備料單_CellBeginEdit;
                     this.dgv備料單.CellValidating += Dgv備料單_CellValidating;
                     this.dgv備料單.CellEndEdit += Dgv備料單_CellEndEdit;
+                    // 支援多行編輯控制器（備註欄需要自動換行）
+                    this.dgv備料單.EditingControlShowing += Dgv備料單_EditingControlShowing;
                 }
             }
             catch { }
+            InitLogClearTimer();
+            // 追蹤表單所屬顯示器，並監聽位置變更以偵測跨螢幕移動
+            try
+            {
+                if (this.IsHandleCreated)
+                {
+                    var sc = Screen.FromControl(this);
+                    _lastScreenDeviceName = sc.DeviceName;
+                    _lastScreenWorkingArea = sc.WorkingArea;
+                }
+                else
+                {
+                    var sc = Screen.PrimaryScreen;
+                    _lastScreenDeviceName = sc.DeviceName;
+                    _lastScreenWorkingArea = sc.WorkingArea;
+                }
+                this.LocationChanged += Form_LocationChanged;
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// 在編輯控制器顯示時，若目前欄位為備註則把編輯控制器設為多行文字框，支援自動換行與垂直捲軸。
+        /// </summary>
+        private void Dgv備料單_EditingControlShowing(object sender, DataGridViewEditingControlShowingEventArgs e)
+        {
+            try
+            {
+                var dgv = this.dgv備料單;
+                if (dgv == null) return;
+                int remarkCol = FindColumnIndexByNames(new[] { "備註", "Remark" });
+                int shippedCol = FindColumnIndexByNames(new[] { "實發數量", "發料數量" });
+                var tb = e.Control as TextBox;
+                if (tb != null)
+                {
+                    // 預設左對齊，避免前一欄位殘留
+                    tb.RightToLeft = System.Windows.Forms.RightToLeft.No;
+                    tb.TextAlign = System.Windows.Forms.HorizontalAlignment.Left;
+                    // 確保移除可能殘留的數字輸入處理器（因為編輯控制項會被重用）
+                    try { tb.KeyPress -= NumericEditing_KeyPress; } catch { }
+                    try { tb.TextChanged -= NumericEditing_TextChanged; } catch { }
+                    // 先移除再綁定命名的處理器，避免重複註冊
+                    try { tb.Enter -= EditingTextBox_EnsureLeftAlign; } catch { }
+                    try { tb.GotFocus -= EditingTextBox_EnsureLeftAlign; } catch { }
+                    try { tb.Enter += EditingTextBox_EnsureLeftAlign; tb.GotFocus += EditingTextBox_EnsureLeftAlign; } catch { }
+                }
+                if (dgv.CurrentCell != null && dgv.CurrentCell.ColumnIndex == remarkCol)
+                {
+                    if (tb != null)
+                    {
+                        tb.Multiline = true;
+                        tb.WordWrap = true;
+                        tb.AcceptsReturn = true;
+                        tb.ScrollBars = ScrollBars.Vertical;
+                        // 強制備註欄為左對齊並關閉 RightToLeft，避免重用控件遺留屬性
+                        tb.RightToLeft = System.Windows.Forms.RightToLeft.No;
+                        tb.TextAlign = System.Windows.Forms.HorizontalAlignment.Left; // 備註欄強制左對齊
+                        try { tb.BackColor = Color.Yellow; } catch { }
+                        try { tb.ForeColor = dgv.CurrentCell.Style.ForeColor.IsEmpty ? Color.Black : dgv.CurrentCell.Style.ForeColor; } catch { try { tb.ForeColor = Color.Black; } catch { } }
+                    }
+                    try
+                    {
+                        if (remarkCol >= 0 && remarkCol < dgv.Columns.Count)
+                        {
+                            dgv.Columns[remarkCol].DefaultCellStyle.WrapMode = DataGridViewTriState.True;
+                            // 確保備註欄預設為左對齊，避免欄位樣式覆蓋編輯控制項
+                            dgv.Columns[remarkCol].DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleLeft;
+                        }
+                    }
+                    catch { }
+                    try { if (dgv.CurrentCell != null) { dgv.CurrentCell.Style.Alignment = DataGridViewContentAlignment.MiddleLeft; dgv.AutoResizeRow(dgv.CurrentCell.RowIndex, DataGridViewAutoSizeRowMode.AllCellsExceptHeader); } } catch { }
+
+                }
+                else
+                {
+                    if (tb != null)
+                    {
+                        tb.Multiline = false;
+                        tb.AcceptsReturn = false;
+                        tb.ScrollBars = ScrollBars.None;
+                        var col = dgv.CurrentCell?.OwningColumn;
+                        // 若是備註欄，強制左對齊
+                        if (col != null && (col.Name.Contains("備註") || col.HeaderText.Contains("備註") || col.Name.Contains("Remark") || col.HeaderText.Contains("Remark")))
+                        {
+                            tb.RightToLeft = System.Windows.Forms.RightToLeft.No;
+                            tb.TextAlign = System.Windows.Forms.HorizontalAlignment.Left;
+                        }
+                        // 僅數字型欄位右對齊
+                        else if (col != null && (col.Name.Contains("數量") || col.HeaderText.Contains("數量") || col.ValueType == typeof(decimal) || col.ValueType == typeof(int)))
+                        {
+                            tb.TextAlign = System.Windows.Forms.HorizontalAlignment.Right;
+                        }
+                        else
+                        {
+                            tb.TextAlign = System.Windows.Forms.HorizontalAlignment.Left;
+                        }
+
+                        // 如果是發料/實發數量欄，綁定數字限制處理器 (KeyPress + TextChanged 用於貼上過濾)
+                        try
+                        {
+                            if (dgv.CurrentCell != null && shippedCol >= 0 && dgv.CurrentCell.ColumnIndex == shippedCol)
+                            {
+                                try { tb.KeyPress -= NumericEditing_KeyPress; } catch { }
+                                try { tb.TextChanged -= NumericEditing_TextChanged; } catch { }
+                                try { tb.KeyPress += NumericEditing_KeyPress; } catch { }
+                                try { tb.TextChanged += NumericEditing_TextChanged; } catch { }
+                            }
+                            else
+                            {
+                                try { tb.KeyPress -= NumericEditing_KeyPress; } catch { }
+                                try { tb.TextChanged -= NumericEditing_TextChanged; } catch { }
+                            }
+                        }
+                        catch { }
+                        try { tb.BackColor = SystemColors.Window; } catch { }
+                        try { tb.ForeColor = SystemColors.ControlText; } catch { }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// 將文字每 N 字插入換行字元（適用於中英文混合，中文視為一字）。
+        /// </summary>
+        /// <remarks>
+        /// 當編輯控制項取得焦點時會由此方法再次強制對齊，避免控件重用時殘留先前的 TextAlign/RightToLeft。
+        /// </remarks>
+        private void EditingTextBox_EnsureLeftAlign(object? sender, EventArgs e)
+        {
+            try
+            {
+                if (!(sender is TextBox txt)) return;
+                var dgv = this.dgv備料單;
+                if (dgv == null) return;
+                int remarkCol = FindColumnIndexByNames(new[] { "備註", "Remark" });
+                if (dgv.CurrentCell != null && dgv.CurrentCell.ColumnIndex == remarkCol)
+                {
+                    txt.RightToLeft = System.Windows.Forms.RightToLeft.No;
+                    txt.TextAlign = System.Windows.Forms.HorizontalAlignment.Left;
+                }
+                else
+                {
+                    var col = dgv.CurrentCell?.OwningColumn;
+                    if (col != null && (col.Name.Contains("數量") || col.HeaderText.Contains("數量") || col.ValueType == typeof(decimal) || col.ValueType == typeof(int)))
+                    {
+                        txt.TextAlign = System.Windows.Forms.HorizontalAlignment.Right;
+                    }
+                    else
+                    {
+                        txt.TextAlign = System.Windows.Forms.HorizontalAlignment.Left;
+                    }
+                    txt.RightToLeft = System.Windows.Forms.RightToLeft.No;
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// KeyPress handler for numeric-only editing controls.
+        /// 只允許控制字元與數字輸入，其他字元會被阻止。
+        /// </summary>
+        private void NumericEditing_KeyPress(object? sender, KeyPressEventArgs e)
+        {
+            try
+            {
+                if (char.IsControl(e.KeyChar)) return;
+                if (!char.IsDigit(e.KeyChar))
+                {
+                    e.Handled = true;
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// TextChanged handler to sanitize pasted content into numeric-only (移除非數字字元)。
+        /// </summary>
+        private void NumericEditing_TextChanged(object? sender, EventArgs e)
+        {
+            try
+            {
+                if (!(sender is TextBox tb)) return;
+                var s = tb.Text ?? string.Empty;
+                // 如果輸入或貼上包含負號，視為不允許的負數行為：顯示提示並還原編輯前值
+                try
+                {
+                    if (s.Contains('-'))
+                    {
+                        SafeShowMessage("不允許輸入負數。", "輸入錯誤", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        // 嘗試還原為編輯前的值（若有紀錄）
+                        try
+                        {
+                            var dgv = this.dgv備料單;
+                            if (dgv != null && dgv.CurrentCell != null)
+                            {
+                                int r = dgv.CurrentCell.RowIndex;
+                                int c = dgv.CurrentCell.ColumnIndex;
+                                string key = r + "_" + c;
+                                if (_dgvCellPrevValues != null && _dgvCellPrevValues.TryGetValue(key, out var prev))
+                                {
+                                    var prevStr = prev?.ToString() ?? string.Empty;
+                                    tb.Text = prevStr;
+                                    tb.SelectionStart = tb.Text.Length;
+                                }
+                                else
+                                {
+                                    // 若無先前值，清空
+                                    tb.Text = string.Empty;
+                                }
+                            }
+                        }
+                        catch { tb.Text = string.Empty; }
+                        return;
+                    }
+
+                    var filtered = Regex.Replace(s, "\\D", "");
+                    if (!string.Equals(s, filtered, StringComparison.Ordinal))
+                    {
+                        int selStart = tb.SelectionStart;
+                        tb.Text = filtered;
+                        // 調整游標位置：盡量保持在原相對位置
+                        tb.SelectionStart = Math.Min(filtered.Length, Math.Max(0, selStart - (s.Length - filtered.Length)));
+                    }
+                }
+                catch { }
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// 將文字每 N 字插入換行字元（適用於中英文混合，中文視為一字）。
+        /// </summary>
+        /// <param name="s">原始字串。</param>
+        /// <param name="n">每隔幾個字元自動換行（n 必須大於 0）。</param>
+        /// <returns>已插入換行字元的字串。</returns>
+        private static string WrapTextEveryN(string s, int n)
+        {
+            if (string.IsNullOrEmpty(s) || n <= 0) return s ?? string.Empty;
+            var sb = new System.Text.StringBuilder(s.Length + (s.Length / n) + 4);
+            int count = 0;
+            foreach (var ch in s)
+            {
+                sb.Append(ch);
+                count++;
+                if (count >= n)
+                {
+                    sb.Append('\n');
+                    count = 0;
+                }
+            }
+            return sb.ToString();
         }
 
         /// <summary>
@@ -381,6 +1602,265 @@ namespace Automatic_Storage
         }
         #endregion
 
+        #region 匯入檔案與 DB 輔助方法
+
+        /// <summary>
+        /// 將原始匯入的 Excel 檔案複製到應用程式目錄下的 `備料單檔案` 資料夾，若檔名重複則加上時間戳。
+        /// 回傳實際儲存的完整路徑（若複製失敗回傳空字串）。
+        /// </summary>
+        private string CopyOriginalFileToFolder(string sourcePath)
+        {
+            try
+            {
+                // 檢查來源路徑是否為空或檔案不存在
+                if (string.IsNullOrEmpty(sourcePath) || !File.Exists(sourcePath)) return string.Empty;
+                // 取得應用程式目錄
+                string baseDir = AppDomain.CurrentDomain.BaseDirectory ?? Directory.GetCurrentDirectory();
+                // 組合備料單檔案資料夾路徑
+                string folder = Path.Combine(baseDir, "備料單檔案");
+                try { Directory.CreateDirectory(folder); } catch { } // 建立資料夾（若不存在）
+
+                // 取得來源檔案名稱
+                string fileName = Path.GetFileName(sourcePath) ?? string.Empty;
+                // 組合目的檔案完整路徑
+                string dest = Path.Combine(folder, fileName);
+                try
+                {
+                    // 直接覆蓋目的檔案（若已存在則覆蓋）
+                    File.Copy(sourcePath, dest, true);
+                    // 回傳實際儲存的路徑
+                    return dest;
+                }
+                catch (Exception ex)
+                {
+                    // 發生例外時寫入錯誤日誌
+                    try { _ = System.Threading.Tasks.Task.Run(() => Automatic_Storage.Utilities.Logger.LogErrorAsync($"CopyOriginalFileToFolder failed: {ex.Message}")); } catch { }
+                    // 回傳空字串表示失敗
+                    return string.Empty;
+                }
+            }
+            catch { return string.Empty; } // 捕捉所有例外並回傳空字串
+        }
+
+        /// <summary>
+        /// 將匯入檔案的 metadata 與每一列資料寫入資料庫。
+        /// 假設資料表 `備料單匯入檔案` 及 `備料單資料列` 已由 DB 管理員建立。
+        /// 本方法會在同一交易中寫入檔案紀錄與多筆列資料。
+        /// </summary>
+        private void InsertImportFileAndRows(DataTable dbTable, string originalFileName, string savedPath, string operatorName)
+        {
+            // 以背景執行，避免阻塞 UI
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                // ...existing code...
+                if (dbTable == null) return;
+                try
+                {
+                    using (var con = db.GetCon())
+                    {
+                        using (var tran = con.BeginTransaction())
+                        {
+                            try
+                            {
+                                int importId = 0;
+                                bool fileAlreadyExists = false;
+
+                                // 1) 檢查是否已有相同原始檔名的匯入紀錄
+                                try
+                                {
+                                    string sqlFind = "SELECT TOP 1 [ImportId] FROM dbo.[備料單匯入檔案] WHERE [原始檔名]=@orig";
+                                    using (var findCmd = new System.Data.SqlClient.SqlCommand(sqlFind, con, tran))
+                                    {
+                                        findCmd.Parameters.AddWithValue("@orig", (object?)originalFileName ?? DBNull.Value);
+                                        object found = findCmd.ExecuteScalar();
+                                        if (found != null && found != DBNull.Value)
+                                        {
+                                            try { importId = Convert.ToInt32(found); fileAlreadyExists = true; } catch { importId = 0; fileAlreadyExists = false; }
+                                        }
+                                    }
+                                }
+                                catch (Exception exFind)
+                                {
+                                    try { _ = System.Threading.Tasks.Task.Run(() => Automatic_Storage.Utilities.Logger.LogErrorAsync($"Find existing import failed: {exFind.Message}")); } catch { }
+                                }
+
+                                if (!fileAlreadyExists)
+                                {
+
+                                    string sqlFile = "INSERT INTO dbo.[備料單匯入檔案]([原始檔名],[儲存檔案路徑],[匯入時間],[資料列數],[匯入者]) VALUES(@orig,@path,@time,@cnt,@user); SELECT CAST(SCOPE_IDENTITY() AS int);";
+                                    using (var cmd = new System.Data.SqlClient.SqlCommand(sqlFile, con, tran))
+                                    {
+                                        cmd.Parameters.AddWithValue("@orig", (object?)originalFileName ?? DBNull.Value);
+                                        cmd.Parameters.AddWithValue("@path", (object?)savedPath ?? DBNull.Value);
+                                        cmd.Parameters.AddWithValue("@time", DateTime.Now);
+                                        cmd.Parameters.AddWithValue("@cnt", dbTable.Rows.Count);
+                                        cmd.Parameters.AddWithValue("@user", (object)operatorName ?? DBNull.Value);
+                                        object idObj = cmd.ExecuteScalar();
+                                        try { importId = Convert.ToInt32(idObj); } catch { importId = 0; }
+                                    }
+
+                                }
+
+                                if (importId <= 0)
+                                {
+                                    // 詳細記錄失敗資訊
+                                    string logMsg = $"[InsertImportFileAndRows] 新增備料單匯入檔案失敗: " +
+                                                    $"originalFileName={originalFileName}, savedPath={savedPath}, operatorName={operatorName}, " +
+                                                    $"rowCount={dbTable?.Rows.Count ?? -1}, fileAlreadyExists={fileAlreadyExists}, importId={importId}";
+                                    try { _ = System.Threading.Tasks.Task.Run(() => Automatic_Storage.Utilities.Logger.LogErrorAsync(logMsg)); } catch { }
+                                    tran.Rollback();
+                                    return;
+                                }
+
+                                var temp = new System.Data.DataTable();
+                                temp.Columns.Add("RowNo", typeof(int));
+                                temp.Columns.Add("RowData", typeof(string));
+                                int rn = 1;
+                                try
+                                {
+                                    foreach (DataRow r in dbTable.Rows)
+                                    {
+                                        try
+                                        {
+                                            string json = SerializeRowToJson(r) ?? string.Empty;
+                                            json = json.Replace("\r", "").Replace("\n", "").Trim();
+                                            var nr = temp.NewRow();
+                                            nr["RowNo"] = rn;
+                                            nr["RowData"] = json;
+                                            temp.Rows.Add(nr);
+                                        }
+                                        catch
+                                        {
+                                            var nr = temp.NewRow();
+                                            nr["RowNo"] = rn;
+                                            nr["RowData"] = string.Empty;
+                                            temp.Rows.Add(nr);
+                                        }
+                                        rn++;
+                                    }
+                                }
+                                catch { }
+                                try
+                                {
+                                    using (var cmdCreate = new System.Data.SqlClient.SqlCommand("CREATE TABLE #tmpRows (RowNo INT, RowData NVARCHAR(MAX));", con, tran))
+                                    {
+                                        cmdCreate.ExecuteNonQuery();
+                                    }
+                                    using (var bulk = new System.Data.SqlClient.SqlBulkCopy(con, System.Data.SqlClient.SqlBulkCopyOptions.Default, tran))
+                                    {
+                                        bulk.DestinationTableName = "#tmpRows";
+                                        bulk.ColumnMappings.Add("RowNo", "RowNo");
+                                        bulk.ColumnMappings.Add("RowData", "RowData");
+                                        bulk.WriteToServer(temp);
+                                    }
+                                    string updateFromTemp =
+                                        @"UPDATE p SET p.[列資料]=t.RowData
+                                            FROM dbo.[備料單資料列] p
+                                            JOIN #tmpRows t ON p.[匯入檔案Id]=@impId AND p.[列號]=t.[RowNo];";
+                                    int rowsUpdated = 0;
+                                    using (var updateCmd = new System.Data.SqlClient.SqlCommand(updateFromTemp, con, tran))
+                                    {
+                                        updateCmd.Parameters.AddWithValue("@impId", importId);
+                                        try { rowsUpdated = updateCmd.ExecuteNonQuery(); } catch { rowsUpdated = 0; }
+                                    }
+                                    string insertFromTemp =
+                                        @"INSERT INTO dbo.[備料單資料列]
+                                            ([匯入檔案Id],[列號],[列資料])
+                                      SELECT @impId, t.RowNo, t.RowData FROM #tmpRows t
+                                      WHERE NOT EXISTS(
+                                            SELECT 1 FROM dbo.[備料單資料列] p
+                                            WHERE p.[匯入檔案Id]=@impId AND p.[列號]=t.[RowNo]
+                                            );";
+                                    int rowsInserted = 0;
+                                    using (var insertCmd = new System.Data.SqlClient.SqlCommand(insertFromTemp, con, tran))
+                                    {
+                                        insertCmd.Parameters.AddWithValue("@impId", importId);
+                                        try { rowsInserted = insertCmd.ExecuteNonQuery(); } catch { rowsInserted = 0; }
+                                    }
+                                    int totalRows = temp.Rows.Count;
+                                    int rowsSkipped = Math.Max(0, totalRows - rowsInserted - rowsUpdated);
+                                    // INSERT 備料單資料列
+                                    //try { _ = System.Threading.Tasks.Task.Run(() => Automatic_Storage.Utilities.Logger.LogInfoAsync($"ImportId={importId}: updated={rowsUpdated}, inserted={rowsInserted}, skipped={rowsSkipped}, fileExists={fileAlreadyExists}")); } catch { }
+                                    try
+                                    {
+                                        using (var cmdDrop = new System.Data.SqlClient.SqlCommand("DROP TABLE IF EXISTS #tmpRows;", con, tran))
+                                        {
+                                            cmdDrop.ExecuteNonQuery();
+                                        }
+                                    }
+                                    catch { }
+                                }
+                                catch (Exception exBatch)
+                                {
+                                    try { _ = System.Threading.Tasks.Task.Run(() => Automatic_Storage.Utilities.Logger.LogErrorAsync($"Bulk insert/check failed: {exBatch.Message}")); } catch { }
+                                    try { using (var cmdDrop = new System.Data.SqlClient.SqlCommand("IF OBJECT_ID('tempdb..#tmpRows') IS NOT NULL DROP TABLE #tmpRows;", con, tran)) { cmdDrop.ExecuteNonQuery(); } } catch { }
+                                }
+                                tran.Commit();
+                            }
+                            catch
+                            {
+                                try { tran.Rollback(); } catch { }
+                                throw;
+                            }
+                        }
+                    }
+                }
+                catch (Exception exOuter)
+                {
+                    try { _ = System.Threading.Tasks.Task.Run(() => Automatic_Storage.Utilities.Logger.LogErrorAsync($"InsertImportFileAndRows failed: {exOuter.Message}")); } catch { }
+                }
+            });
+        }
+
+        /// <summary>
+        /// 將 DataRow 序列化為簡單的 JSON 字串（不依賴外部套件），主要用於儲存欄位名稱與值。
+        /// 針對常見特殊字元做基本轉譯。
+        /// </summary>
+        private string SerializeRowToJson(DataRow r)
+        {
+            try
+            {
+                // 如果 DataRow 為 null，回傳空的 JSON 物件
+                if (r == null) return "{}";
+                // 建立字串組合器
+                var sb = new System.Text.StringBuilder();
+                // 加入 JSON 起始大括號
+                sb.Append('{');
+                // 標記是否為第一個欄位
+                bool first = true;
+                // 逐一處理 DataRow 的每個欄位
+                foreach (DataColumn col in r.Table.Columns)
+                {
+                    // 如果不是第一個欄位，先加逗號分隔
+                    if (!first) sb.Append(',');
+                    // 第一個欄位處理完後設為 false
+                    first = false;
+                    // 取得欄位名稱，若為 null 則設為空字串
+                    string key = col.ColumnName ?? string.Empty;
+                    // 取得欄位值，若為 null 或 DBNull 則設為空字串
+                    object? val = r[col];
+                    string sval = val == null || val == DBNull.Value ? string.Empty : val.ToString() ?? string.Empty;
+                    // 對值進行基本跳脫處理（反斜線、雙引號、換行、斷行）
+                    sval = sval.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\r", "\\r").Replace("\n", "\\n");
+                    // 對欄位名稱進行基本跳脫處理
+                    key = key.Replace("\\", "\\\\").Replace("\"", "\\\"");
+                    // 組合成 JSON 格式的 key:value
+                    sb.Append('"').Append(key).Append('"').Append(':').Append('"').Append(sval).Append('"');
+                }
+                // 加入 JSON 結尾大括號
+                sb.Append('}');
+                // 回傳組合好的 JSON 字串
+                return sb.ToString();
+            }
+            catch
+            {
+                // 發生例外時回傳空的 JSON 物件
+                return "{}";
+            }
+        }
+
+        #endregion
+
         #region Fields
         /// <summary>
         /// 記錄可見的 Excel 欄位索引（1-based）。
@@ -393,6 +1873,12 @@ namespace Automatic_Storage
         /// 以便後續進行數量累加、檢查或其他操作。
         /// </summary>
         private List<DataGridViewRow> _lastMatchedRows = new List<DataGridViewRow>();
+        
+        /// <summary>
+        /// 記錄上次比對的類型：0=未知, 1=精確單筆, 2=模糊多筆或完全相同。
+        /// 用於控制數量分配成功時的焦點位置管理。
+        /// </summary>
+        private int _lastMatchResultType = 0;
         #endregion
 
         #region Misc Helpers
@@ -558,6 +2044,25 @@ namespace Automatic_Storage
 
         #endregion
 
+        /// <summary>
+        /// 將備註內容轉換為純文字，移除 HTML 標籤與控制字元（僅保留換行與回車），以便安全寫回 Excel。
+        /// </summary>
+        /// <param name="s">原始備註字串。</param>
+        /// <returns>處理後的純文字備註內容。</returns>
+        private static string SanitizeRemarkForExcel(string s)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(s)) return string.Empty;
+                // 移除簡單的 HTML 標籤
+                var noTags = System.Text.RegularExpressions.Regex.Replace(s, "<.*?>", string.Empty);
+                // 移除控制字元（保留換行與回車）
+                var cleanedChars = noTags.Where(c => c == '\r' || c == '\n' || !char.IsControl(c)).ToArray();
+                return new string(cleanedChars);
+            }
+            catch { return s ?? string.Empty; }
+        }
+
         #region DataGridView Event Handlers
         /// <summary>
         /// 在儲存格進入編輯模式前，記錄該儲存格的目前值。
@@ -577,6 +2082,59 @@ namespace Automatic_Storage
                 if (dgv == null) return;
                 var key = e.RowIndex + "_" + e.ColumnIndex;
                 try { _dgvCellPrevValues[key] = dgv.Rows[e.RowIndex].Cells[e.ColumnIndex].Value; } catch { _dgvCellPrevValues[key] = null; }
+                try
+                {
+                    // 如果是備註欄位，強制將 cell、選取顏色與編輯面板/控制項背景設為亮黃色
+                    int remarkCol = FindColumnIndexByNames(new[] { "備註", "Remark" });
+                    if (remarkCol >= 0 && e.ColumnIndex == remarkCol)
+                    {
+                        try
+                        {
+                            var cell = dgv.Rows[e.RowIndex].Cells[e.ColumnIndex];
+                            if (cell != null)
+                            {
+                                try { cell.Style.BackColor = Color.Yellow; } catch { }
+                                try { cell.Style.SelectionBackColor = Color.Yellow; } catch { }
+                            }
+                        }
+                        catch { }
+
+                        try
+                        {
+                            // 立刻嘗試設定 EditingPanel 背景（若已存在）
+                            try
+                            {
+                                var panel = dgv.EditingPanel;
+                                if (panel != null) try { panel.BackColor = Color.Yellow; } catch { }
+                            }
+                            catch { }
+
+                            // 延遲執行以確保 EditingControl 已建立，並再次設定 editing panel 與 control 背景
+                            this.BeginInvoke(new Action(() =>
+                            {
+                                try
+                                {
+                                    try
+                                    {
+                                        var panel = dgv.EditingPanel;
+                                        if (panel != null) try { panel.BackColor = Color.Yellow; } catch { }
+                                    }
+                                    catch { }
+
+                                    var ctl = dgv.EditingControl as TextBox;
+                                    if (ctl != null)
+                                    {
+                                        try { ctl.BackColor = Color.Yellow; } catch { }
+                                        try { ctl.ForeColor = Color.Black; } catch { }
+                                    }
+                                }
+                                catch { }
+                            }));
+                        }
+                        catch { }
+                    }
+                }
+                catch { }
             }
             catch { }
         }
@@ -604,7 +2162,21 @@ namespace Automatic_Storage
 
                 if (e.ColumnIndex == shippedCol)
                 {
-                    // 驗證邏輯在 CellEndEdit 中統一處理
+                    // 驗證：只允許空白或整數數字，其他輸入會被取消並提示
+                    try
+                    {
+                        var v = e.FormattedValue?.ToString() ?? string.Empty;
+                        v = v.Trim();
+                        if (string.IsNullOrEmpty(v)) return; // 允許空白
+                        // 只允許整數（0-9）字元
+                        if (!Regex.IsMatch(v, "^\\d+$"))
+                        {
+                            SafeShowMessage("僅允許輸入正整數數字。", "輸入錯誤", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                            e.Cancel = true;
+                            return;
+                        }
+                    }
+                    catch { }
                 }
             }
             catch { }
@@ -635,6 +2207,10 @@ namespace Automatic_Storage
                 var dgv = this.dgv備料單;
                 if (dgv == null) return;
 
+                // Guard: ensure row/column indexes are valid to avoid null dereference warnings (CS8602)
+                if (e.RowIndex < 0 || e.RowIndex >= dgv.Rows.Count) return;
+                if (e.ColumnIndex < 0 || e.ColumnIndex >= dgv.Columns.Count) return;
+
                 // 清除列錯誤提示
                 int shippedCol = FindColumnIndexByNames(new[] { "實發數量", "發料數量" });
                 if (shippedCol < 0)
@@ -644,13 +2220,69 @@ namespace Automatic_Storage
 
                 if (e.ColumnIndex != shippedCol)
                 {
+                    // 如果這不是發料欄，檢查是否為備註欄；若是備註欄，則套用自動換行的格式化
+                    try
+                    {
+                        int remarkCol = FindColumnIndexByNames(new[] { "備註", "Remark" });
+                        if (remarkCol >= 0 && e.ColumnIndex == remarkCol)
+                        {
+                            try
+                            {
+                                var row = dgv.Rows[e.RowIndex];
+                                if (row != null && e.ColumnIndex >= 0 && e.ColumnIndex < row.Cells.Count)
+                                {
+                                    var cell = row.Cells[e.ColumnIndex];
+                                    var raw = cell?.Value?.ToString() ?? string.Empty;
+                                    // 移除既有換行，並每 REMARK_WRAP_CHARS 字插入換行
+                                    string collapsed = raw?.Replace("\r", "").Replace("\n", "") ?? string.Empty;
+                                    if (!string.IsNullOrEmpty(collapsed))
+                                    {
+                                        string wrapped = WrapTextEveryN(collapsed, REMARK_WRAP_CHARS);
+                                        try { var _cell = cell; if (_cell != null) _cell.Value = wrapped; } catch { }
+                                        try { var _style = cell?.Style; if (_style != null) _style.WrapMode = DataGridViewTriState.True; } catch { }
+                                        try { dgv.AutoResizeRow(e.RowIndex, DataGridViewAutoSizeRowMode.AllCellsExceptHeader); } catch { }
+                                        // 檢查備註內容是否與編輯前不同，若不同則標示為已修改
+                                        try
+                                        {
+                                            var key = e.RowIndex + "_" + e.ColumnIndex;
+                                            if (!_suspendDirtyMarking)
+                                            {
+                                                if (_dgvCellPrevValues.TryGetValue(key, out var prev))
+                                                {
+                                                    string prevStr = prev?.ToString()?.Replace("\r", "").Replace("\n", "")?.Trim() ?? string.Empty;
+                                                    string newStr = collapsed?.Trim() ?? string.Empty;
+                                                    if (!string.Equals(prevStr, newStr, StringComparison.Ordinal))
+                                                    {
+                                                        _isDirty = true;
+                                                    }
+                                                }
+                                                else
+                                                {
+                                                    // 若沒有先前值，且現值非空，視為已修改
+                                                    if (!string.IsNullOrEmpty(collapsed)) _isDirty = true;
+                                                }
+                                            }
+                                        }
+                                        catch { }
+                                    }
+                                }
+                            }
+                            catch { }
+                        }
+                    }
+                    catch { }
+
+                    try { RevertTemporaryRemarkEditAtCell(e.RowIndex, e.ColumnIndex); } catch { }
                     return;
                 }
 
                 // 解析目前編輯後的值（使用共用 helper）
-                    decimal curVal = 0m;
-                    string cellValue = dgv.Rows[e.RowIndex].Cells[e.ColumnIndex].Value?.ToString() ?? string.Empty;
-                try { var v = dgv.Rows[e.RowIndex].Cells[e.ColumnIndex].Value?.ToString() ?? string.Empty; TextParsing.TryParseDecimalValue(v, out curVal); } catch { curVal = 0m; }
+                decimal curVal = 0m;
+                var rowAtIndex = dgv.Rows[e.RowIndex];
+                if (rowAtIndex == null) return;
+                var editedCell = (e.ColumnIndex >= 0 && e.ColumnIndex < rowAtIndex.Cells.Count) ? rowAtIndex.Cells[e.ColumnIndex] : null;
+                string cellValue = editedCell?.Value?.ToString() ?? string.Empty;
+                try { var v = editedCell?.Value?.ToString() ?? string.Empty; TextParsing.TryParseDecimalValue(v, out curVal); } catch { curVal = 0m; }
 
                 // 取得料號 key（嘗試昶亨料號, 客戶料號）
                 string matKey = string.Empty;
@@ -685,7 +2317,8 @@ namespace Automatic_Storage
                 catch { }
 
                 // 【修正】取得目前編輯的儲存格及其狀態 - 先做這個，與是否有需求欄無關
-                var currentCell = dgv.Rows[e.RowIndex].Cells[e.ColumnIndex];
+                var currentCell = editedCell;
+                if (currentCell == null) return;
                 bool isEmptyValue = string.IsNullOrEmpty(currentCell.Value?.ToString());
                 bool isValidNumber = decimal.TryParse(currentCell.Value?.ToString(), out _);
 
@@ -839,12 +2472,6 @@ namespace Automatic_Storage
 
 
         /// <summary>
-        /// 保存目前表單上按鈕／ToolStripItem 的 Enabled 狀態，並將它們暫時停用。
-        /// 呼叫此方法可避免長時間背景工作期間使用者誤操作。
-        /// 還原工作請使用 <see cref="RestoreAllButtons"/>。
-        /// </summary>
-        #region UI Helpers
-        /// <summary>
         /// 儲存目前資料並停用所有按鈕。
         /// </summary>
         /// <remarks>
@@ -870,6 +2497,10 @@ namespace Automatic_Storage
             await Task.Run(() =>
             {
                 Excel.Application? xlApp = null; Excel.Workbook? wb = null; Excel.Worksheet? wsMain = null; Excel.Worksheet? wsLog = null; Excel.Range? rng = null;
+                // helper to execute actions safely (suppresses exceptions but respects cancellation)
+                Action<Action> safeExec = (action) => { try { if (token.IsCancellationRequested) return; action(); } catch { } };
+                // If cancellation already requested, exit early to avoid expensive COM work
+                if (token.IsCancellationRequested) return;
                 try
                 {
                     // 使用 ExcelService 取代直接 new Excel.Application
@@ -878,11 +2509,11 @@ namespace Automatic_Storage
                     {
                         if (_typedExcelService is not null)
                         {
-                            dataTable = _typedExcelService.LoadFirstWorksheetToDataTable(currentExcelPath);
+                            dataTable = _typedExcelService.LoadFirstWorksheetToDataTable(currentExcelPath!);
                         }
                         else if (_excelService is not null)
                         {
-                            dataTable = ((IExcelService)_excelService).LoadFirstWorksheetToDataTable(currentExcelPath);
+                            dataTable = ((IExcelService)_excelService).LoadFirstWorksheetToDataTable(currentExcelPath!);
                         }
                         else
                         {
@@ -895,7 +2526,31 @@ namespace Automatic_Storage
                         // TODO: 可加入錯誤提示或例外處理
                     }
                     // 使用 ReadOnly = false 以便回寫，保留巨集時不要改變檔案格式
+                    if (xlApp == null)
+                    {
+                        try
+                        {
+                            xlApp = new Excel.Application { DisplayAlerts = false, Visible = false };
+                        }
+                        catch
+                        {
+                            xlApp = null;
+                        }
+                    }
+
+                    if (xlApp == null)
+                    {
+                        // 無法取得或建立 Excel COM 物件，無法進行回寫
+                        return;
+                    }
+
+                    // quick cancellation checkpoint after acquiring COM object
+                    if (token.IsCancellationRequested) return;
+
                     wb = xlApp.Workbooks.Open(excelPath, ReadOnly: false, Password: string.IsNullOrEmpty(_cachedExcelPassword) ? Type.Missing : (object)_cachedExcelPassword);
+
+                    // cancellation checkpoint after opening workbook (costly op)
+                    if (token.IsCancellationRequested) return;
 
                     // 取得總表
                     try { wsMain = wb.Worksheets["總表"] as Excel.Worksheet; } catch { wsMain = null; }
@@ -990,8 +2645,8 @@ namespace Automatic_Storage
                                     // 確保如果成功建立，將其顯示並移動到總表後方
                                     if (wsLog != null)
                                     {
-                                        try { wsLog.Visible = Excel.XlSheetVisibility.xlSheetVisible; } catch (Exception ex) { creationError = creationError ?? ex.ToString(); }
-                                        try { wsLog.Move(After: wsMain); } catch (Exception ex) { creationError = creationError ?? ex.ToString(); }
+                                        safeExec(() => wsLog.Visible = Excel.XlSheetVisibility.xlSheetVisible);
+                                        safeExec(() => wsLog.Move(After: wsMain));
                                     }
                                 }
                                 catch (Exception ex)
@@ -1031,8 +2686,8 @@ namespace Automatic_Storage
                         else
                         {
                             // 如果已存在，確保為可見並移動到總表後方以確保位置
-                            try { wsLog.Visible = Excel.XlSheetVisibility.xlSheetVisible; } catch { }
-                            try { wsLog.Move(Type.Missing, wsMain); } catch { }
+                            safeExec(() => wsLog.Visible = Excel.XlSheetVisibility.xlSheetVisible);
+                            safeExec(() => wsLog.Move(Type.Missing, wsMain));
                         }
                     }
                     catch { wsLog = null; }
@@ -1076,9 +2731,9 @@ namespace Automatic_Storage
                             // 樣式：標題置中、垂直置中、粗體
                             if (headerRange != null)
                             {
-                                try { headerRange.HorizontalAlignment = Excel.XlHAlign.xlHAlignCenter; } catch { }
-                                try { headerRange.VerticalAlignment = Excel.XlVAlign.xlVAlignCenter; } catch { }
-                                try { headerRange.Font.Bold = true; } catch { }
+                                safeExec(() => headerRange.HorizontalAlignment = Excel.XlHAlign.xlHAlignCenter);
+                                safeExec(() => headerRange.VerticalAlignment = Excel.XlVAlign.xlVAlignCenter);
+                                safeExec(() => headerRange.Font.Bold = true);
                             }
 
                             // 設定欄位內容對齊：刷入時間(左), 料號(左), 數量(右), 操作者(右)
@@ -1128,26 +2783,7 @@ namespace Automatic_Storage
                                 string logPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Automatic_Storage", "logs");
                                 try { Directory.CreateDirectory(logPath); } catch { }
                                 string fn = Path.Combine(logPath, $"CreateRecordSheetFail_{DateTime.Now:yyyyMMdd_HHmmss}.txt");
-                                try
-                                {
-                                    var sb = new System.Text.StringBuilder();
-                                    sb.AppendLine($"Time: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
-                                    try { sb.AppendLine($"ExcelPath: {excelPath}"); } catch { }
-                                    try { sb.AppendLine($"Workbook Worksheets Count: {wb?.Worksheets?.Count}"); } catch { }
-                                    try { sb.AppendLine($"Workbook ReadOnly: {wb?.ReadOnly}"); } catch { }
-                                    if (!string.IsNullOrEmpty(creationError))
-                                    {
-                                        sb.AppendLine("CreationError:");
-                                        sb.AppendLine(creationError);
-                                    }
-                                    else
-                                    {
-                                        sb.AppendLine("CreationError: (none captured)");
-                                    }
-
-                                    // debug file write removed
-                                }
-                                catch { }
+                                // diagnostic info assembly removed (debug file write removed)
 
                                 SafeBeginInvoke(this, new Action(() =>
                                 {
@@ -1277,8 +2913,8 @@ namespace Automatic_Storage
                                     {
                                         try
                                         {
-                                            var hnSan = SanitizeHeaderForMatch(hn);
-                                            if (!string.IsNullOrEmpty(hnSan) && targetNames.Any(t => SanitizeHeaderForMatch(t) == hnSan)) matched = true;
+                                            var hnSan = SanitizeHeaderForMatch(hn ?? string.Empty);
+                                            if (!string.IsNullOrEmpty(hnSan) && targetNames.Any(t => SanitizeHeaderForMatch(t ?? string.Empty) == hnSan)) matched = true;
                                         }
                                         catch { }
                                     }
@@ -1539,24 +3175,30 @@ namespace Automatic_Storage
         /// <param name="action">要在 UI 執行緒執行的動作</param>
         private void SafeBeginInvoke(Control ctl, Action action)
         {
+            // 嘗試執行指定的委派（action）
             try
             {
+                // 如果 action 為 null，直接返回
                 if (action == null) return;
+                // 設定目標控制項，若 ctl 為 null 則使用 this
                 Control target = ctl ?? this;
-                // 若 target 已 disposal 或不可用，嘗試使用 this
+                // 如果目標控制項為 null 或已經被釋放，則改用 this
                 if (target == null || target.IsDisposed)
                 {
                     target = this;
                 }
+                // 如果目標控制項不為 null 且尚未被釋放
                 if (target != null && !target.IsDisposed)
                 {
+                    // 如果需要跨執行緒呼叫
                     if (target.InvokeRequired)
                     {
-                        // 若 handle 尚未建立，先嘗試建立 Handle
+                        // 若控制項尚未建立 Handle，嘗試建立
                         try { var h = target.Handle; } catch { }
+                        // 如果還是沒有建立 Handle
                         if (!target.IsHandleCreated)
                         {
-                            // 若仍未建立 handle，改用 BeginInvoke on threadpool via BeginInvoke on this if possible
+                            // 若 this 可用且已建立 Handle，則用 this.BeginInvoke 執行
                             try
                             {
                                 if (this != null && !this.IsDisposed && this.IsHandleCreated)
@@ -1566,20 +3208,20 @@ namespace Automatic_Storage
                                 }
                             }
                             catch { }
-                            // 退而求其次：在 background thread 執行，不安全但避免拋例外
+                            // 若無法在 UI 執行緒執行，則在背景執行緒執行（避免拋出例外）
                             Task.Run(action);
                             return;
                         }
-
+                        // 若已建立 Handle，則用 target.BeginInvoke 執行
                         try { target.BeginInvoke(action); return; } catch { }
                     }
                     else
                     {
+                        // 若不需跨執行緒，直接執行 action
                         try { action(); return; } catch { }
                     }
                 }
-
-                // fallback: run on threadpool to avoid throwing
+                // 若上述皆無法執行，則在背景執行緒執行（避免拋出例外）
                 Task.Run(action);
             }
             catch { }
@@ -1596,44 +3238,56 @@ namespace Automatic_Storage
         /// - 方法為防禦式實作：當傳入的 <paramref name="dgv"/> 為 <see langword="null"/> 或無欄位時，會安全回退且不拋出例外。
         /// </remarks>
         /// <param name="dgv">要檢查並隱藏欄位的 <see cref="System.Windows.Forms.DataGridView"/> 控制項。</param>
-        private void HideColumnsByHeaders(DataGridView dgv)
+        private void HideColumnsByHeaders(DataGridView? dgv)
         {
+            var swHide = Stopwatch.StartNew();
+            // 嘗試執行隱藏欄位的邏輯
             try
             {
+                // 如果 DataGridView 或其欄位為 null 或沒有欄位則直接返回
                 if (dgv == null || dgv.Columns == null || dgv.Columns.Count == 0) return;
+                // 宣告一個用來存放標準化後隱藏欄位名稱的集合
                 HashSet<string>? sanSet = null;
+                // 如果有偵測到隱藏欄位標頭，則將其標準化後存入集合
                 if (_lastHiddenHeaders != null && _lastHiddenHeaders.Count > 0)
                 {
                     sanSet = new HashSet<string>(_lastHiddenHeaders.Select(SanitizeHeaderForMatch));
                 }
 
-                // 保護重要的 shipped-like 欄位，即使標頭為空或被偵測為 Hidden 也不要自動隱藏
-                // Reuse the centralized sanitizer for column name normalization
+                // 宣告一個標準化欄位名稱的委派
                 Func<string, string> NormalizeColName = SanitizeHeaderForMatch;
+                // 定義發料/實發數量的同義詞陣列
                 var shippedSynonyms = new[] { "實發數量", "發料數量" };
+                // 將同義詞標準化後存入集合
                 var shippedNorms = new HashSet<string>(shippedSynonyms.Select(NormalizeColName));
 
+                // 逐一檢查每個 DataGridView 欄位
                 foreach (DataGridViewColumn col in dgv.Columns)
                 {
+                    // 預設不隱藏
                     bool hide = false;
 
-                    // 若標頭為空，預設視為要隱藏（通常為 streaming 路徑補上但無內容的欄位）
+                    // 如果欄位標頭為空，預設要隱藏
                     var header = col.HeaderText ?? string.Empty;
                     if (string.IsNullOrWhiteSpace(header)) { hide = true; }
 
-                    // 如果有從 Excel 偵測到被隱藏的標頭，依標準化後比對
+                    // 如果有偵測到隱藏欄位且目前欄位標頭標準化後有在集合中，則設為隱藏
                     if (!hide && sanSet != null)
                     {
                         var san = SanitizeHeaderForMatch(header);
                         if (sanSet.Contains(san)) { hide = true; }
                     }
 
-                    // 如果欄位看起來像是發料/實發等重要欄位，保留它（不要隱藏）
+                    // 如果欄位名稱或標頭看起來像是發料/實發數量，則強制不隱藏
                     try
                     {
+                        // 取得候選名稱（DataPropertyName 或 Name）
                         var candidate = !string.IsNullOrEmpty(col.DataPropertyName) ? col.DataPropertyName : col.Name;
+                        // 標準化候選名稱
                         var candNorm = NormalizeColName(candidate ?? string.Empty);
+                        // 標準化標頭
                         var headerNorm = NormalizeColName(header ?? string.Empty);
+                        // 如果候選名稱或標頭在同義詞集合中，則不隱藏
                         if (!string.IsNullOrEmpty(candNorm) && shippedNorms.Contains(candNorm))
                         {
                             hide = false;
@@ -1645,11 +3299,17 @@ namespace Automatic_Storage
                     }
                     catch { }
 
-                    // 設定可見性
+                    // 設定欄位的可見性（true=顯示，false=隱藏）
                     try { col.Visible = !hide; } catch { }
                 }
             }
             catch { }
+            finally
+            {
+                try { swHide.Stop(); } catch { }
+                /*花費時間*/
+                //try { _ = Task.Run(() => Automatic_Storage.Utilities.Logger.LogInfoAsync($"HideColumnsByHeaders: elapsed={swHide.ElapsedMilliseconds}ms")); } catch { }
+            }
         }
 
         /// <summary>
@@ -1663,33 +3323,37 @@ namespace Automatic_Storage
         /// </remarks>
         private void ResetGridBeforeBind()
         {
+            var swReset = Stopwatch.StartNew();
             try
             {
+                // 如果 DataGridView 為 null 則直接返回
                 if (this.dgv備料單 == null) return;
                 try
                 {
+                    // 如果 DataGridView 或其欄位為 null 或沒有欄位則直接返回
                     if (this.dgv備料單 == null || this.dgv備料單.Columns == null || this.dgv備料單.Columns.Count == 0) return;
 
                     // 取得 DataTable（若有）以便判斷整欄是否全空
                     DataTable? dt = null;
                     try { dt = this.dgv備料單.DataSource as DataTable; } catch { dt = null; }
 
+                    // 宣告一個用來存放標準化後隱藏欄位名稱的集合
                     HashSet<string>? sanSet = null;
                     if (_lastHiddenHeaders != null && _lastHiddenHeaders.Count > 0)
                     {
+                        // 將隱藏欄位標頭標準化後存入集合
                         sanSet = new HashSet<string>(_lastHiddenHeaders.Select(SanitizeHeaderForMatch));
                     }
 
-                    // Debug logging removed: production build should not write per-column debug traces
-
-                    // Prepare a set of protected column name norms (shipped-like columns) to avoid hiding them
-                    // Reuse the centralized sanitizer for column name normalization
+                    // 準備一組重要欄位名稱（發料/實發數量）以避免被隱藏
                     Func<string, string> NormalizeColName = SanitizeHeaderForMatch;
                     var shippedSynonyms = new[] { "實發數量", "發料數量" };
                     var shippedNorms = new HashSet<string>(shippedSynonyms.Select(NormalizeColName));
 
+                    // 逐一檢查每個 DataGridView 欄位
                     foreach (DataGridViewColumn col in this.dgv備料單.Columns)
                     {
+                        // 預設不隱藏
                         bool hide = false;
                         string reason = "";
 
@@ -1710,6 +3374,7 @@ namespace Automatic_Storage
                             var colName = !string.IsNullOrEmpty(col.DataPropertyName) ? col.DataPropertyName : col.Name;
                             if (!string.IsNullOrEmpty(colName) && dt.Columns.Contains(colName))
                             {
+                                // 檢查該欄是否有任何非空值
                                 bool anyNonEmpty = false;
                                 foreach (DataRow r in dt.Rows)
                                 {
@@ -1744,12 +3409,9 @@ namespace Automatic_Storage
                             }
                         }
 
-                        // 設定可見性
+                        // 設定欄位的可見性（true=顯示，false=隱藏）
                         try { col.Visible = !hide; } catch { }
-                        // per-column debug entry removed
                     }
-                    // 輸出 debug log 到檔案
-                    // file-based debug dump removed
                 }
                 catch { }
                 // 依需求：移除背景回寫佇列與背景工作者，僅允許「匯入」與「存檔」進行 Excel 回寫
@@ -1758,11 +3420,8 @@ namespace Automatic_Storage
                 try { if (this.dgv備料單.Dock != DockStyle.Fill) this.dgv備料單.Dock = DockStyle.Fill; } catch { }
                 // 強制設為 FullRowSelect，確保選取 cell 會選整列
                 try { this.dgv備料單.SelectionMode = DataGridViewSelectionMode.FullRowSelect; } catch { }
-                // Ensure selection visuals are hidden and no cell is focused
+                // 確保隱藏選取效果並且沒有目前儲存格
                 try { this.BeginInvoke(new Action(() => { try { HideSelectionInGrid(this.dgv備料單); } catch { } })); } catch { }
-                // 初次顯示先不進行自動欄寬，避免在後續重新綁定時重複計算造成延遲；
-                // 綁定完成後會於 DataBindingComplete 統一調整
-                //try { AutoSizeColumnsFillNoHorizontalScroll(this.dgv備料單); } catch { }
                 // 初始化 Resize 去抖 timer（使用具名 handler 以便解除註冊）
                 try
                 {
@@ -1793,6 +3452,12 @@ namespace Automatic_Storage
             {
                 // 忽略初始化期間的小錯誤，避免在 UI 啟動時拋出未處理例外
             }
+            finally
+            {
+                try { swReset.Stop(); } catch { }
+                /*花費時間*/
+                //try { _ = Task.Run(() => Automatic_Storage.Utilities.Logger.LogInfoAsync($"ResetGridBeforeBind: elapsed={swReset.ElapsedMilliseconds}ms")); } catch { }
+            }
             // 註冊 DataGridView 的 CellFormatting 以確保顯示樣式在每次繪製時一致
             try { this.dgv備料單.CellFormatting += Dgv備料單_CellFormatting; } catch { }
         }
@@ -1803,707 +3468,17 @@ namespace Automatic_Storage
         /// - 清除選取並嘗試移除 CurrentCell
         /// </summary>
         /// <param name="dgv"></param>
-        private void HideSelectionInGrid(DataGridView dgv)
+        private void HideSelectionInGrid(DataGridView? dgv)
         {
             try
             {
-                // Delegate to the centralized helper to ensure consistent, UI-safe behavior
-                // Use the fully-qualified name to avoid needing additional using directives
+                // 如果 DataGridView 為 null 則直接返回
+                if (dgv == null) return;
+                // 委派給集中式 helper，確保 UI 執行緒安全
+                // 使用完整類別名稱，避免需要額外 using
                 Automatic_Storage.Utilities.DgvHelpers.HideSelectionInGrid(this, dgv);
             }
             catch { }
-        }
-
-        /// <summary>
-        /// 事件處理：使用者按下「匯入檔案」按鈕。
-        /// 此方法會以非同步方式開啟檔案選擇對話方塊，並啟動 Excel 讀取與解析流程。
-        /// 注意：此處僅負責啟動與協調，實際解析會在背景作業或分離方法中執行以避免阻塞 UI。
-        /// </summary>
-        /// <param name="sender">事件來源（按鈕）。</param>
-        /// <param name="e">事件參數。</param>
-        private async void btn備料單匯入檔案_Click(object sender, EventArgs e)
-        {
-            // 防呆：避免重入
-            if (_isImporting)
-            {
-                try { MessageBox.Show("目前已有匯入作業在進行中，請稍後再試。", "提醒", MessageBoxButtons.OK, MessageBoxIcon.Information); } catch { }
-                return;
-            }
-
-            // 【關鍵】在最外層先保存遊標狀態，便於在 finally 中還原
-            Cursor prevCursor = Cursor.Current;
-            bool prevUseWaitCursor = Application.UseWaitCursor;
-
-            _isImporting = true;
-            UpdateButtonStates();
-            try
-            {
-                // Restore original import logic (from backup) with UI lock around the whole operation.
-                // 使用者按下匯入檔案：不再強制在表單關閉前保留匯入按鈕為不可按，
-                // 讓 DataBindingComplete/還原流程能在匯入完成後恢復按鈕狀態
-                // (原先此 flag 會導致匯入完成後按鈕無法被還原，造成不可按的 bug)
-                _keepImportButtonDisabledUntilClose = false;
-
-                using (OpenFileDialog ofd = new OpenFileDialog())
-                {
-                    ofd.Filter = "Excel 檔案|*.xls;*.xlsx;*.xlsm|All files|*.*";
-                    ofd.Title = "選擇備料單 Excel 檔案";
-                    ofd.Multiselect = false;
-
-                    if (ofd.ShowDialog() != DialogResult.OK) return;
-                    string path = ofd.FileName;
-
-                    // 【修正】每次使用匯入之前，先清空 UI 與暫存，避免多次匯入資料累加到 dgv 上
-                    try
-                    {
-                        // 解除綁定並清除舊資料
-                        if (this.dgv備料單 != null)
-                        {
-                            try { this.dgv備料單.DataSource = null; } catch { }
-                            try { this.dgv備料單.Rows.Clear(); } catch { }
-                            try { this.dgv備料單.Refresh(); } catch { }
-                        }
-
-                        // 清除內部暫存與狀態
-                        try { _currentUiTable = null; } catch { }
-                        try { _records?.Clear(); } catch { }
-                        try { _lastAppendedRecords?.Clear(); } catch { }
-                        try { _lastMatchedRows?.Clear(); } catch { }
-                        try { _materialIndex?.Clear(); } catch { }
-                        try { _preservedRedKeys?.Clear(); } catch { }
-                        try { _isDirty = false; } catch { }
-                    }
-                    catch { }
-
-                    // 先鎖定 UI 與顯示等待遮罩，確保在任何 COM/IO 操作前就讓使用者看到等待狀態
-                    try { try { _cts?.Cancel(); } catch { } _cts = new CancellationTokenSource(); } catch { }
-                    try { SaveAndDisableAllButtons(); } catch { }
-                    try { SetControlEnabledSafe(this.btn備料單返回, false); } catch { }
-                    try { SetControlEnabledSafe(this.btn備料單Unlock, false); } catch { }
-                    try { SetControlEnabledSafe(this.btn備料單匯出, false); } catch { }
-                    try { SetControlEnabledSafe(this.btn備料單存檔, false); } catch { }
-                    try { ShowOperationOverlay(); } catch { }
-                    try { _prevUseWaitCursor = Application.UseWaitCursor; Application.UseWaitCursor = true; } catch { }
-                    // prevCursor 和 prevUseWaitCursor 已在函式外層定義
-                    try { Cursor.Current = Cursors.WaitCursor; } catch { }
-
-                    // 讓步給 UI 執行緒，確保遮罩與游標能立即呈現
-                    try { this.Refresh(); Application.DoEvents(); } catch { }
-                    try { await Task.Yield(); } catch { }
-
-                    // 初始化記錄容器與讀檔流程
-                    _records = new List<Dto.記錄Dto>();
-                    _records = new List<Dto.記錄Dto>();
-                    try { try { _cts?.Cancel(); } catch { } _cts = new CancellationTokenSource(); } catch { }
-
-                    DataTable? uiTable = null;
-                    Exception? loadEx = null;
-                    try
-                    {
-                        // 統一用注入型 IExcelService 讀取 Excel
-                        uiTable = GetExcelService().LoadFirstWorksheetToDataTable(path);
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        loadEx = new OperationCanceledException("匯入被取消。");
-                    }
-                    catch (Exception ex)
-                    {
-                        loadEx = ex;
-                    }
-
-                    if (loadEx != null)
-                    {
-                        SafeBeginInvoke(this, new Action(() =>
-                        {
-                            MessageBox.Show($"Excel 讀取失敗：{loadEx.Message}", "錯誤", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                            this.currentExcelPath = null;
-                            try { Application.UseWaitCursor = _prevUseWaitCursor; } catch { }
-                            try { Cursor.Current = Cursors.Default; } catch { }
-                            try { HideOperationOverlay(); } catch { }
-                            try { RestoreAllButtons(); } catch { }
-                        }));
-                        return;
-                    }
-
-                    if (uiTable == null || uiTable.Rows.Count == 0)
-                    {
-                        SafeBeginInvoke(this, new Action(() =>
-                        {
-                            MessageBox.Show("讀取檔案後未取得資料。", "匯入失敗", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                            this.currentExcelPath = null;
-                            try { Application.UseWaitCursor = _prevUseWaitCursor; } catch { }
-                            try { Cursor.Current = Cursors.Default; } catch { }
-                            try { HideOperationOverlay(); } catch { }
-                            try { RestoreAllButtons(); } catch { }
-                        }));
-                        return;
-                    }
-
-                    // 公式處理
-                    ExcelInteropHelper.RemoveHiddenColumnsFromDataTable(path, uiTable);
-                    try { await Task.Run(() => ReplaceFormulasWithValuesFromExcel(path, uiTable, _cts?.Token ?? CancellationToken.None)); }
-                    catch (OperationCanceledException)
-                    {
-                        SafeBeginInvoke(this, new Action(() =>
-                        {
-                            MessageBox.Show("匯入已被使用者取消。", "取消", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                            try { Application.UseWaitCursor = _prevUseWaitCursor; } catch { }
-                            try { Cursor.Current = Cursors.Default; } catch { }
-                            try { HideOperationOverlay(); } catch { }
-                            try { RestoreAllButtons(); } catch { }
-                        }));
-                        return;
-                    }
-                    catch (Exception ex)
-                    {
-                        SafeBeginInvoke(this, new Action(() =>
-                        {
-                            MessageBox.Show($"公式處理失敗：{ex.Message}", "錯誤", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                        }));
-                    }
-
-                    // 修正：取得 mapping 並處理錯誤
-                    Dictionary<string, int> mapping;
-                    string errMsg;
-                    if (!ValidateAndMapColumns(uiTable, out mapping, out errMsg))
-                    {
-                        SafeBeginInvoke(this, new Action(() =>
-                        {
-                            MessageBox.Show($"Excel 欄位對應失敗：{errMsg}", "錯誤", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                        }));
-                        return;
-                    }
-                    this._columnMapping = mapping;
-
-                    // DataGridView 綁定 (簡化：採用原先流程)
-                    try
-                    {
-                        try { if (this.dgv備料單 != null) { BeginUpdate(this.dgv備料單); SetDoubleBuffered(this.dgv備料單, true); } } catch { }
-                        try
-                        {
-                            if (this.dgv備料單 is not null)
-                            {
-                                this.dgv備料單.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.None;
-                            }
-                        }
-                        catch { }
-                        ResetGridBeforeBind();
-                        if (this.dgv備料單 != null && uiTable != null) RebuildGridColumnsFromDataTable(this.dgv備料單, uiTable);
-                        try { if (this.dgv備料單 != null) this.dgv備料單.DataSource = uiTable; } catch { }
-                        _currentUiTable = uiTable;
-                        this.currentExcelPath = path;
-                        // 綁定完成後將程式性修改標記為已接受（AcceptChanges），並清除暫存回寫記錄，
-                        // 避免 ReplaceFormulasWithValuesFromExcel / NPOI 寫入造成 DataTable.GetChanges() 回傳變更而誤觸發未存檔提醒
-                        try { _suspendDirtyMarking = true; } catch { }
-                        try
-                        {
-                            try { uiTable?.AcceptChanges(); } catch { }
-                            try { _isDirty = false; } catch { }
-                            try { _records?.Clear(); } catch { }
-                            try { _lastAppendedRecords?.Clear(); } catch { }
-                        }
-                        finally
-                        {
-                            try { _suspendDirtyMarking = false; } catch { }
-                        }
-                        int shippedCol = FindColumnIndexByNames(new[] { "實發數量", "發料數量" });
-                        if (this.dgv備料單 is not null && shippedCol >= 0 && this.dgv備料單.Columns != null && shippedCol < this.dgv備料單.Columns.Count)
-                        {
-                            this.dgv備料單.Columns[shippedCol].DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleRight;
-                        }
-                        var postToken = _cts?.Token ?? CancellationToken.None;
-                        _ = UpdateExcelAfterImportAsync(this.currentExcelPath, postToken);
-                        try { if (this.dgv備料單 != null) EndUpdate(this.dgv備料單); } catch { }
-                        try { if (this.dgv備料單 != null) HideSelectionInGrid(this.dgv備料單); } catch { }
-                    }
-                    catch (Exception ex)
-                    {
-                        MessageBox.Show($"綁定資料時發生錯誤：{ex.Message}", "錯誤", MessageBoxButtons.OK, MessageBoxIcon.Error);
-
-                        this.currentExcelPath = null;
-                    }
-
-                    // UI 還原
-                    try { HideOperationOverlay(); } catch { }
-                    try { RestoreAllButtons(); } catch { }
-                }
-            }
-            finally
-            {
-                // 【關鍵】無論成功或失敗，都必須還原遊標和等待狀態
-                try { Application.UseWaitCursor = _prevUseWaitCursor; } catch { }
-                try { Cursor.Current = prevCursor; this.Cursor = Cursors.Default; } catch { }
-                try { HideOperationOverlay(); } catch { }
-
-                _isImporting = false;
-                UpdateButtonStates();
-
-                // 【關鍵】匯入完成後，自動將畫面切換回「鎖定」狀態
-                // 這樣按鈕會顯示「解鎖」，並且匯出/存檔按鈕將再次可按（有資料時）
-                try { SetEditingLocked(true); } catch { }
-
-                // 在取消或完成匯入後，確保按鈕狀態符合實際資料情況
-                try { UpdateMainButtonsEnabled(); } catch { }
-            }
-        }
-
-        /// <summary>
-        /// 事件處理：使用者按下「匯出」按鈕。
-        /// 會以非同步方式匯出目前 DataGridView 的內容為外部檔案（例如 CSV/Excel），並在完成後回報狀態。
-        /// </summary>
-        /// <param name="sender">事件來源（按鈕）。</param>
-        /// <param name="e">事件參數。</param>
-        private async void btn備料單匯出_Click(object sender, EventArgs e)
-        {
-            // 防呆：避免重入
-            if (_isExporting)
-            {
-                try { MessageBox.Show("目前已有匯出作業在進行中，請稍後再試。", "提醒", MessageBoxButtons.OK, MessageBoxIcon.Information); } catch { }
-                return;
-            }
-            if (!CheckExcelAvailable()) return;
-
-            _isExporting = true;
-            UpdateButtonStates();
-            // 顯示執行中提示與等待游標，並暫時停用相關操作按鈕
-            var prevCursor = Cursor.Current;
-            _prevUseWaitCursor = Application.UseWaitCursor;
-            SaveAndDisableAllButtons();
-            ShowOperationOverlay("匯出中，請稍候...");
-            Application.UseWaitCursor = true;
-            Cursor.Current = Cursors.WaitCursor;
-            bool exportSucceeded = false;
-            try
-            {
-                // 檢查是否有未存檔變更：優先判斷 _isDirty 或暫存 _records
-                bool hasUnsavedChanges = false;
-                try
-                {
-                    if (_isDirty) hasUnsavedChanges = true;
-                    if (_records != null && _records.Count > 0) hasUnsavedChanges = true;
-
-                    // 如果目前沒有 _isDirty / _records，但 DataTable 報告有變更，進一步檢查是否為使用者可編輯的欄位
-                    var dt = this.dgv備料單?.DataSource as DataTable;
-                    if (!hasUnsavedChanges && dt != null && DataTableHasRealChanges(dt))
-                    {
-                        bool userEditableChangeFound = false;
-
-                        // Alternate approach: inspect the changes.Columns names for any column that looks like "實發/發料".
-                        // This avoids relying on grid column index mapping which can be fragile after DataTable schema adjustments.
-                        var shippedSynonyms = new[] { "實發數量", "發料數量" };
-                        // Reuse centralized sanitizer for various local normalizations
-                        Func<string, string> San = SanitizeHeaderForMatch;
-                        var shippedNorms = new HashSet<string>(shippedSynonyms.Select(San));
-
-                        try
-                        {
-                            var changes = dt.GetChanges();
-                            if (changes != null)
-                            {
-                                // Log changed column names for diagnosis
-                                try
-                                {
-                                    var changedCols = changes.Columns.Cast<DataColumn>().Select(c => c.ColumnName).ToArray();
-
-                                }
-                                catch { }
-
-                                foreach (DataColumn ch in changes.Columns)
-                                {
-                                    try
-                                    {
-                                        var colName = ch.ColumnName ?? string.Empty;
-                                        var colNorm = San(colName);
-                                        if (string.IsNullOrEmpty(colNorm)) continue;
-                                        if (shippedNorms.Contains(colNorm) || shippedNorms.Any(s => colNorm.Contains(s) || s.Contains(colNorm)))
-                                        {
-                                            // Found a changed column that looks like shipped -> inspect rows to confirm value change
-                                            foreach (DataRow r in changes.Rows)
-                                            {
-                                                try
-                                                {
-                                                    object? orig = null, cur = null;
-                                                    try { orig = r[colName, DataRowVersion.Original]; } catch { orig = null; }
-                                                    try { cur = r[colName, DataRowVersion.Current]; } catch { cur = null; }
-                                                    bool origEmpty = orig == null || orig == DBNull.Value || (orig is string os && string.IsNullOrWhiteSpace(os));
-                                                    bool curEmpty = cur == null || cur == DBNull.Value || (cur is string cs && string.IsNullOrWhiteSpace(cs));
-                                                    if (origEmpty && curEmpty) continue;
-                                                    if (orig is string os2 && cur is string cs2)
-                                                    {
-                                                        if (!string.Equals(os2.Trim(), cs2.Trim(), StringComparison.Ordinal)) { userEditableChangeFound = true; break; }
-                                                    }
-                                                    else
-                                                    {
-                                                        if (!object.Equals(orig, cur)) { userEditableChangeFound = true; break; }
-                                                    }
-                                                }
-                                                catch { }
-                                            }
-                                            if (userEditableChangeFound) break;
-                                        }
-                                    }
-                                    catch { }
-                                    if (userEditableChangeFound) break;
-                                }
-                                // Also write a sample of the first few changed cells into the debug log to aid diagnosis
-                                try
-                                {
-                                    int rowIdx = 0;
-                                    foreach (DataRow r in changes.Rows)
-                                    {
-                                        try
-                                        {
-                                            var samples = new List<string>();
-                                            foreach (DataColumn c in changes.Columns)
-                                            {
-                                                try
-                                                {
-                                                    object? o1 = null, o2 = null;
-                                                    try { o1 = r[c.ColumnName, DataRowVersion.Original]; } catch { o1 = null; }
-                                                    try { o2 = r[c.ColumnName, DataRowVersion.Current]; } catch { o2 = null; }
-                                                    samples.Add($"{c.ColumnName}:[{o1}]->[{o2}]");
-                                                }
-                                                catch { }
-                                            }
-                                            // Debug log removed
-                                        }
-                                        catch { }
-                                        rowIdx++; if (rowIdx >= 5) break;
-                                    }
-                                }
-                                catch { }
-                            }
-                        }
-                        catch { }
-
-                        // 如果找不到使用者可編輯欄位的實際變更，則視為程式性變更（例如 ReadOnly/Focus/格式套用），不視為未存檔
-                        if (userEditableChangeFound) hasUnsavedChanges = true;
-                    }
-                }
-                catch { }
-
-                // 診斷資訊已移除（留存 log 與 AppendDebugLog），避免在正常匯出流程彈出測試用視窗
-
-                if (hasUnsavedChanges)
-                {
-                    var dr = MessageBox.Show("畫面有未存檔的變更，是否先存檔？\n(選是將先執行存檔，選否則直接繼續匯出)", "未存檔提醒", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
-                    if (dr == DialogResult.Cancel)
-                    {
-                        // 使用者取消時，確保 UI 狀態被完全還原，避免卡在等待游標
-                        EnsureUiFullyRestored();
-                        return;
-                    }
-                    else if (dr == DialogResult.Yes)
-                    {
-                        // 先存檔，並取得詳細錯誤
-                        SaveResultDto? saveResult = null;
-                        try
-                        {
-                            saveResult = await SaveAsyncWithResult();
-                        }
-                        catch (Exception ex)
-                        {
-                            saveResult = new SaveResultDto { Success = false, ErrorMessage = ex.Message };
-                        }
-                        if (saveResult == null || !saveResult.Success)
-                        {
-                            // 讀取本地測試日誌已移除；僅使用 saveResult.ErrorMessage 作為錯誤來源
-                            string? lastError = null;
-                            var msg = "存檔失敗，已取消匯出。";
-                            if (!string.IsNullOrEmpty(saveResult?.ErrorMessage))
-                                msg += "\n\n錯誤主因：" + (saveResult?.ErrorMessage ?? string.Empty);
-                            if (!string.IsNullOrEmpty(lastError))
-                                msg += "\n\n詳細錯誤：" + lastError;
-                            MessageBox.Show(msg, "取消匯出", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                            // 在取消匯出前，確保 UI 狀態被完全還原，避免卡在等待游標或按鈕停用
-                            EnsureUiFullyRestored();
-                            return;
-                        }
-                    }
-                    // 若為 No，則繼續匯出（不儲存）
-                }
-
-                // 顯示存檔對話框讓使用者選擇輸出位置
-                bool showDialogCancelled = false;
-                using (var sfd = new SaveFileDialog())
-                {
-                    sfd.Title = "另存為...";
-                    sfd.Filter = "Excel 檔案 (*.xlsx;*.xlsm;*.xls)|*.xlsx;*.xlsm;*.xls|所有檔案 (*.*)|*.*";
-                    sfd.FileName = Path.GetFileName(this.currentExcelPath) ?? "export.xlsx";
-                    // 關閉 SaveFileDialog 的內建覆蓋提示，改由程式自行顯示自訂覆蓋確認，避免兩次提示
-                    try { sfd.OverwritePrompt = false; } catch { }
-                    try { EnsureCursorRestored(); } catch { }
-                    if (sfd.ShowDialog(this) != DialogResult.OK)
-                    {
-                        showDialogCancelled = true;
-                    }
-                    else
-                    {
-                        var dest = sfd.FileName;
-                        try
-                        {
-                            // 若目的檔案已存在，顯示更完整的檔案資訊並詢問是否覆蓋
-                            if (File.Exists(dest))
-                            {
-                                try
-                                {
-                                    var fi = new FileInfo(dest);
-                                    string sizeText = fi.Length >= 1024 ? (fi.Length >= 1024 * 1024 ? (fi.Length / (1024.0 * 1024.0)).ToString("F2") + " MB" : (fi.Length / 1024.0).ToString("F1") + " KB") : fi.Length + " bytes";
-                                    string info = $"檔案已存在：{dest}\r\n大小：{sizeText}\r\n最後修改：{fi.LastWriteTime:yyyy/MM/dd HH:mm}\r\n是否要覆蓋？";
-                                    var over = MessageBox.Show(info, "確認覆蓋", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
-                                    if (over != DialogResult.Yes)
-                                    {
-                                        // 使用者選「否」時，也要還原游標後才 return
-                                        try { Application.UseWaitCursor = false; Cursor.Current = Cursors.Default; this.Cursor = Cursors.Default; } catch { }
-                                        return;
-                                    }
-                                }
-                                catch
-                                {
-                                    var over = MessageBox.Show($"檔案已存在：{dest}\n是否要覆蓋？", "確認覆蓋", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
-                                    if (over != DialogResult.Yes)
-                                    {
-                                        // 使用者選「否」時，也要還原游標後才 return
-                                        try { Application.UseWaitCursor = false; Cursor.Current = Cursors.Default; this.Cursor = Cursors.Default; } catch { }
-                                        return;
-                                    }
-                                }
-                            }
-
-                            File.Copy(this.currentExcelPath, dest, true);
-                            MessageBox.Show("已匯出檔案: " + dest, "匯出完成", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                            // 標記匯出成功；只有成功時才會在 finally 中清除畫面/內部資料
-                            exportSucceeded = true;
-                        }
-                        catch (Exception ex)
-                        {
-                            MessageBox.Show("匯出失敗: " + ex.Message, "錯誤", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                        }
-                    }
-                }
-                if (showDialogCancelled)
-                {
-                    // SaveFileDialog 被取消時，標記為取消狀態
-                    // 不再在這裡做任何 return，讓流程走完 finally 才退出
-                    // 這樣可以確保 finally 的 Application.UseWaitCursor = false 能被執行
-                }
-                // 注意：即使 showDialogCancelled，也要讓程式走到 finally
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show("匯出失敗: " + ex.Message, "錯誤", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
-            finally
-            {
-                // 【關鍵】export 完成後，ALWAYS 強制設定 UseWaitCursor = false，無論原狀態為何
-                // 這樣可以確保即使 prevCursor 被保存為非 Default 值，遊標也會被完全還原
-                try { Application.UseWaitCursor = false; } catch { }
-                try { Cursor.Current = Cursors.Default; } catch { }
-                try { this.Cursor = Cursors.Default; } catch { }
-
-                // 對所有 open forms 遍歷，明確設定 Cursor = Default
-                try
-                {
-                    foreach (Form f in Application.OpenForms)
-                    {
-                        try
-                        {
-                            if (f != null)
-                            {
-                                f.Cursor = Cursors.Default;
-                                // 對 form 的所有 controls 也直接設定
-                                foreach (Control c in f.Controls)
-                                {
-                                    try { if (c != null) c.Cursor = Cursors.Default; } catch { }
-                                }
-                            }
-                        }
-                        catch { }
-                    }
-                }
-                catch { }
-
-                try { HideOperationOverlay(); } catch { }
-                try { RestoreAllButtons(); } catch { }
-
-                // 結束 DataGridView 編輯、清除焦點、鎖定編輯
-                try { if (this.dgv備料單 != null) { if (this.dgv備料單.IsCurrentCellInEditMode) { this.dgv備料單.EndEdit(); } try { this.dgv備料單.CancelEdit(); } catch { } try { this.dgv備料單.CurrentCell = null; } catch { } try { this.dgv備料單.ClearSelection(); } catch { } } } catch { }
-                try { SetEditingLocked(true); } catch { }
-
-                // 清除快速索引與暫存記錄
-                try { ClearMaterialIndex(); } catch { }
-
-                // 只有在實際匯出成功時，才會清除或重置 form 內部狀態與畫面資料
-                if (exportSucceeded)
-                {
-                    try { ResetFormState(); } catch { }
-                }
-
-                // 解除匯出旗標並更新按鈕狀態
-                try { _isExporting = false; } catch { }
-                UpdateButtonStates();
-                try { UpdateMainButtonsEnabled(); } catch { }
-
-                // 如果匯出成功，則在匯出完成後將「解鎖」按鈕設為不可按，避免使用者在匯出後立即修改或解鎖
-                try
-                {
-                    if (exportSucceeded)
-                    {
-                        try { _keepUnlockButtonDisabledUntilClose = true; } catch { }
-                        try { SetControlEnabledSafe(this.btn備料單Unlock, false); } catch { }
-                    }
-                }
-                catch { }
-
-                // 最後強制把焦點移到 form，並呼叫 ReleaseCapture + 遊標重繪
-                try { this.Focus(); } catch { }
-                try { this.Activate(); } catch { }
-                try { NativeHelpers.ReleaseCapture(); } catch { }
-                try { Cursor.Hide(); Cursor.Show(); } catch { }
-                try { Application.DoEvents(); } catch { }
-
-                // 【診斷】記錄最終 UI 狀態快照以診斷遊標卡住問題
-                try
-                {
-                    var sb = new System.Text.StringBuilder();
-                    sb.AppendLine($"[EXPORT_FINALLY_SNAPSHOT]");
-                    sb.AppendLine($"  Application.UseWaitCursor={Application.UseWaitCursor}");
-                    sb.AppendLine($"  Cursor.Current={Cursor.Current}");
-                    sb.AppendLine($"  this.Cursor={this.Cursor}");
-                    sb.AppendLine($"  prevCursor={prevCursor}");
-                    sb.AppendLine($"  _prevUseWaitCursor={_prevUseWaitCursor}");
-                    sb.AppendLine($"  exportSucceeded={exportSucceeded}");
-                    sb.AppendLine($"  _isExporting={_isExporting}");
-
-                    // 掃描所有 form 和頂層 control 的 Cursor 狀態
-                    try
-                    {
-                        int fIdx = 0;
-                        foreach (Form f in Application.OpenForms)
-                        {
-                            if (f != null)
-                            {
-                                fIdx++;
-                                sb.AppendLine($"  [Form {fIdx}] {f.GetType().Name} @ {f.Handle}: Cursor={f.Cursor}");
-
-                                // 記錄 form 內任何 Cursor != Default 的 control
-                                try
-                                {
-                                    int nonDefaultCount = 0;
-                                    foreach (Control c in f.Controls)
-                                    {
-                                        if (c != null && c.Cursor != Cursors.Default)
-                                        {
-                                            nonDefaultCount++;
-                                            sb.AppendLine($"    ⚠ Control {c.GetType().Name}: Cursor={c.Cursor}");
-                                        }
-                                    }
-                                    if (nonDefaultCount == 0)
-                                    {
-                                        sb.AppendLine($"    ✓ All top-level controls have Cursor.Default");
-                                    }
-                                }
-                                catch (Exception ex) { sb.AppendLine($"    [Error scanning controls: {ex.Message}]"); }
-                            }
-                        }
-                    }
-                    catch (Exception ex) { sb.AppendLine($"  [Error scanning forms: {ex.Message}]"); }
-
-
-                }
-                catch { }
-            }
-        }
-
-        /// <summary>
-        /// 事件處理：使用者按下「返回」按鈕。
-        /// 此方法會關閉表單或回到上一層畫面，並在必要時清理臨時狀態。
-        /// </summary>
-        /// <param name="sender">事件來源（按鈕）。</param>
-        /// <param name="e">事件參數。</param>
-        private void btn備料單返回_Click(object sender, EventArgs e)
-        {
-            // 需求：返回只隱藏，不要重置目前表單資料；再次由主畫面開啟時，恢復同一個實例
-            try { RestoreAllButtons(); } catch { }
-            try { HideOperationOverlay(); } catch { }
-
-            // 隱藏目前視窗並回到 owner（不需驗證 Excel，避免在返回時出現異常）
-            try { this.Hide(); } catch { }
-            if (this.Owner is Form owner)
-            {
-                try { owner.Show(); owner.BringToFront(); owner.Activate(); } catch { }
-            }
-        }
-
-        /// <summary>
-        /// [事件] 備料單解鎖/鎖定按鈕點擊事件。
-        /// - 若目前為鎖定狀態，點擊後顯示密碼輸入對話框，驗證成功則解鎖（可編輯）；失敗或取消則維持鎖定。
-        /// - 若目前為解鎖狀態，點擊後直接鎖定（不可編輯）。
-        /// - 過程中會自動處理游標、UI 狀態與按鈕啟用狀態，避免重複操作或異常狀態殘留。
-        /// </summary>
-        /// <param name="sender">事件來源（按鈕控制項）。</param>
-        /// <param name="e">事件參數。</param>
-        private void btn備料單Unlock_Click(object sender, EventArgs e)
-        {
-            // 防呆：避免在其他操作進行時解鎖
-            if (_isImporting || _isExporting || _isSaving)
-            {
-                try { MessageBox.Show("目前有作業在進行中，請稍後再試。", "提醒", MessageBoxButtons.OK, MessageBoxIcon.Information); } catch { }
-                return;
-            }
-
-            // 暫時禁用解鎖按鈕，避免使用者重複點擊
-            try { SetControlEnabledSafe(this.btn備料單Unlock, false); } catch { }
-            // 不在顯示密碼輸入時使用等待游標或遮罩，避免阻塞使用者輸入
-            // 若有較長時間的背景工作再顯示 overlay / 等待游標
-
-            SafeBeginInvoke(this, new Action(() =>
-            {
-                try
-                {
-                    if (_isEditingLocked)
-                    {
-                        // 在顯示密碼輸入對話框前，確保游標與 UI 狀態已恢復（避免對話框出現時仍為等待游標）
-                        try { EnsureCursorRestored(); } catch { }
-
-                        // 需要密碼才能解鎖畫面編輯：使用可重試的對話框，錯誤時不自動關閉視窗
-                        string expected = GetExcelPassword();
-                        bool ok = PromptForPasswordWithRetry(expected);
-                        if (ok)
-                        {
-                            // 解鎖成功：設定為解鎖狀態（false = 解鎖）
-                            // SetEditingLocked() 內部會呼叫 UpdateMainButtonsEnabled() 更新所有按鈕狀態
-                            SetEditingLocked(false);
-                        }
-                        else
-                        {
-                            // 使用者取消或驗證失敗，不做任何變更，按鈕狀態保持原樣（鎖定狀態不變）
-                        }
-                    }
-                    else
-                    {
-                        // 已解鎖，點擊即鎖定（不需密碼）
-                        // SetEditingLocked() 內部會呼叫 UpdateMainButtonsEnabled() 更新所有按鈕狀態
-                        SetEditingLocked(true);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    // Fire-and-forget log to avoid changing method signature; swallow any errors from logging
-                    try { _ = Task.Run(() => Utilities.Logger.LogErrorAsync("Unlock UI failed: " + ex.Message)); } catch { }
-                }
-                finally
-                {
-                    // 強制還原游標與 UI 狀態（使用強制還原而非回復 prev，避免 prev 在其他流程被改變導致殘留）
-                    try { Application.UseWaitCursor = false; } catch { }
-                    try { Cursor.Current = Cursors.Default; } catch { }
-                    try { this.Cursor = Cursors.Default; } catch { }
-                    try { EnsureCursorRestored(); } catch { }
-                    try { HideOperationOverlay(); } catch { }
-                    try { if (!_keepUnlockButtonDisabledUntilClose) SetControlEnabledSafe(this.btn備料單Unlock, true); } catch { }
-                }
-            }));
         }
 
         #region DataGridView helpers
@@ -2514,21 +3489,32 @@ namespace Automatic_Storage
         /// </summary>
         /// <param name="dgv">目標 DataGridView</param>
         /// <param name="dt">來源 DataTable</param>
-        private void RebuildGridColumnsFromDataTable(DataGridView dgv, DataTable dt)
+        private void RebuildGridColumnsFromDataTable(DataGridView? dgv, DataTable dt)
         {
-            if (dgv == null || dt == null) return;
-            dgv.Columns.Clear();
-            foreach (DataColumn col in dt.Columns)
+            var sw = Stopwatch.StartNew();
+            try
             {
-                var gridCol = new DataGridViewTextBoxColumn
+                if (dgv == null || dt == null) return;
+                dgv.Columns.Clear();
+                foreach (DataColumn col in dt.Columns)
                 {
-                    Name = col.ColumnName,
-                    HeaderText = col.ColumnName,
-                    DataPropertyName = col.ColumnName,
-                    ReadOnly = true,
-                    SortMode = DataGridViewColumnSortMode.NotSortable
-                };
-                // ...existing code...
+                    var gridCol = new DataGridViewTextBoxColumn
+                    {
+                        Name = col.ColumnName,
+                        HeaderText = col.ColumnName,
+                        DataPropertyName = col.ColumnName,
+                        ReadOnly = true,
+                        SortMode = DataGridViewColumnSortMode.NotSortable
+                    };
+                    // 關鍵：將欄位加入 DataGridView，確保資料綁定
+                    dgv.Columns.Add(gridCol);
+                }
+            }
+            finally
+            {
+                try { sw.Stop(); } catch { }
+                /*花費時間*/
+                //try { _ = Task.Run(() => Automatic_Storage.Utilities.Logger.LogInfoAsync($"RebuildGridColumnsFromDataTable: elapsed={sw.ElapsedMilliseconds}ms")); } catch { }
             }
         }
         /// <summary>
@@ -2542,7 +3528,7 @@ namespace Automatic_Storage
             if (dgv == null || dgv.Rows == null) return;
             var defaultBack = dgv.DefaultCellStyle?.BackColor ?? SystemColors.Window;
             var preservedColor = Color.Red; // keep shortage red highlights
-            foreach (DataGridViewRow row in dgv.Rows)
+            foreach (DataGridViewRow? row in dgv.Rows)
             {
                 if (row == null || row.IsNewRow) continue;
                 foreach (DataGridViewCell cell in row.Cells)
@@ -2557,7 +3543,7 @@ namespace Automatic_Storage
                             cell.Style.BackColor = defaultBack;
                         }
                         // 還原前景色為預設
-                        try { cell.Style.ForeColor = dgv.DefaultCellStyle?.ForeColor ?? SystemColors.ControlText; } catch { }
+                        try { var _style = cell?.Style; if (_style != null) _style.ForeColor = dgv?.DefaultCellStyle?.ForeColor ?? SystemColors.ControlText; } catch { }
                     }
                     catch { }
                 }
@@ -2608,59 +3594,7 @@ namespace Automatic_Storage
             try { HideOperationOverlay(); } catch { }
             try
             {
-                var logPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ui_restore_debug.log");
-                var sb = new System.Text.StringBuilder();
-                sb.AppendLine("--- EnsureUiFullyRestored DIAG " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") + " ---");
-                try
-                {
-                    foreach (Form f in Application.OpenForms)
-                    {
-                        try
-                        {
-                            sb.AppendLine($"Form: Name={f?.Name} Text={f?.Text} Visible={f?.Visible} WindowState={f?.WindowState} Handle={f?.Handle} Cursor={f?.Cursor} Capture={f?.Capture} ActiveControl={(f?.ActiveControl != null ? f.ActiveControl.Name : "<none>")}");
-                            if (f is not null && f.Controls is not null)
-                            {
-                                foreach (Control c in f.Controls)
-                                {
-                                    if (c is null) continue;
-                                    try
-                                    {
-                                        string cType = c.GetType().Name;
-                                        string cName = c.Name;
-                                        string cInfo = $"  Control: Type={cType} Name={cName} Visible={c.Visible} Enabled={c.Enabled} Cursor={c.Cursor} Capture={c.Capture} Focused={c.Focused}";
-                                        sb.AppendLine(cInfo);
-
-                                        // 若控制項為 DataGridView，嘗試強制 EndEdit/CancelEdit 並記錄狀態
-                                        if (c is DataGridView dgv)
-                                        {
-                                            try
-                                            {
-                                                if (dgv.Rows is not null)
-                                                    sb.AppendLine($"    DataGridView: Rows={dgv.Rows.Count} Columns={(dgv.Columns != null ? dgv.Columns.Count : -1)} CurrentCell={(dgv.CurrentCell != null ? dgv.CurrentCell.RowIndex + "," + dgv.CurrentCell.ColumnIndex : "<none>")} IsCurrentCellInEditMode={dgv.IsCurrentCellInEditMode} EditMode={dgv.EditMode}");
-                                                // 強制嘗試結束編輯與取消編輯
-                                                try { if (dgv.IsCurrentCellInEditMode) dgv.EndEdit(); } catch { }
-                                                try { if (dgv.IsCurrentCellInEditMode) dgv.CancelEdit(); } catch { }
-                                                try { dgv.ClearSelection(); } catch { }
-                                                try { dgv.CurrentCell = null; } catch { }
-                                                sb.AppendLine($"    AfterForce: IsCurrentCellInEditMode={dgv.IsCurrentCellInEditMode} CurrentCell={(dgv.CurrentCell != null ? dgv.CurrentCell.RowIndex + "," + dgv.CurrentCell.ColumnIndex : "<none>")}");
-                                            }
-                                            catch (Exception exDgv)
-                                            {
-                                                sb.AppendLine($"    DataGridView exception: {exDgv}");
-                                            }
-                                        }
-                                    }
-                                    catch { }
-                                    try { c.Cursor = Cursors.Default; } catch { }
-                                }
-                            }
-                        }
-                        catch { }
-                    }
-                }
-                catch { }
-                sb.AppendLine("--- End DIAG ---\r\n");
-                // Debug write removed
+                // Debug diagnostics removed: EnsureUiFullyRestored UI snapshot suppressed
                 // 確保將焦點移回安全控制項
                 try { if (Application.OpenForms.Count > 0) { var f0 = Application.OpenForms[0]; try { f0.Activate(); if (f0.ActiveControl != null) f0.ActiveControl.Focus(); else f0.Focus(); } catch { } } } catch { }
             }
@@ -2708,17 +3642,6 @@ namespace Automatic_Storage
         /// </summary>
         private static class NativeHelpers
         {
-            /// <summary>
-            /// 釋放目前執行緒對滑鼠的捕捉（mouse capture），使滑鼠輸入恢復到預設行為。
-            /// </summary>
-            /// <remarks>
-            /// 此方法封裝 Win32 API <c>ReleaseCapture</c> 的呼叫。
-            /// 在某些拖曳或控制項呼叫 <c>SetCapture</c> 後，系統會將滑鼠事件限制於單一視窗，
-            /// 呼叫本方法可確保系統不再將事件鎖定於該視窗。
-            /// </remarks>
-            /// <returns>
-            /// <see langword="true" /> if the function succeeds; otherwise, <see langword="false" />.
-            /// </returns>
             [System.Runtime.InteropServices.DllImport("user32.dll")]
             public static extern bool ReleaseCapture();
         }
@@ -2780,11 +3703,14 @@ namespace Automatic_Storage
                         // 逐欄設為不可排序與唯讀（以展示為主）
                         try
                         {
-                            foreach (DataGridViewColumn col in dgv.Columns)
+                            if (dgv?.Columns != null)
                             {
-                                try { col.SortMode = DataGridViewColumnSortMode.NotSortable; } catch { }
-                                try { col.ReadOnly = true; } catch { }
-                                try { col.Resizable = DataGridViewTriState.False; } catch { }
+                                foreach (DataGridViewColumn col in dgv.Columns)
+                                {
+                                    try { col.SortMode = DataGridViewColumnSortMode.NotSortable; } catch { }
+                                    try { col.ReadOnly = true; } catch { }
+                                    try { col.Resizable = DataGridViewTriState.False; } catch { }
+                                }
                             }
                         }
                         catch { }
@@ -2800,7 +3726,7 @@ namespace Automatic_Storage
                 {
                     try { if (this.txt備料單料號 != null) this.txt備料單料號.Text = string.Empty; } catch { }
                     try { if (this.txt備料單數量 != null) this.txt備料單數量.Text = string.Empty; } catch { }
-                    try { this.txt備料單料號?.Focus(); } catch { }
+                    try { try { _suppressNextTxt料號EnterPrompt = true; } catch { } this.txt備料單料號?.Focus(); } catch { }
                 }
                 catch { }
 
@@ -2911,11 +3837,9 @@ namespace Automatic_Storage
         /// <param name="locked">true 表示鎖定（不可編輯），false 表示解鎖（可編輯）</param>
         private void SetEditingLocked(bool locked)
         {
-            // Update internal flag first
+
             _isEditingLocked = locked;
 
-            // Temporarily suspend dirty marking while we programmatically adjust ReadOnly/Focus/etc.
-            // This prevents SetEditingLocked from causing false-positive "unsaved changes".
             bool dtHadChangesBefore = false;
             try
             {
@@ -3210,10 +4134,11 @@ namespace Automatic_Storage
                         {
                             var row = dgv.Rows[r];
                             if (row == null || row.IsNewRow) continue;
-                            var v = row.Cells[c].Value?.ToString();
+                            var cell = row.Cells.Count > c ? row.Cells[c] : null;
+                            var v = cell?.Value?.ToString();
                             if (string.IsNullOrWhiteSpace(v)) continue;
                             samples++;
-                            if (decimal.TryParse(v.Replace(",", ""), System.Globalization.NumberStyles.Number, System.Globalization.CultureInfo.InvariantCulture, out _)) numericCount++;
+                            if (decimal.TryParse((v ?? string.Empty).Replace(",", ""), System.Globalization.NumberStyles.Number, System.Globalization.CultureInfo.InvariantCulture, out _)) numericCount++;
                         }
                         catch { }
                     }
@@ -3226,9 +4151,13 @@ namespace Automatic_Storage
             {
                 try
                 {
-                    dgv.Columns[c].DefaultCellStyle.Alignment = decided[c];
+                    var colX = dgv.Columns[c];
+                    if (colX == null) continue;
+                    if (colX.DefaultCellStyle != null)
+                        colX.DefaultCellStyle.Alignment = decided[c];
                     // 標題居中
-                    dgv.Columns[c].HeaderCell.Style.Alignment = DataGridViewContentAlignment.MiddleCenter;
+                    if (colX.HeaderCell != null && colX.HeaderCell.Style != null)
+                        colX.HeaderCell.Style.Alignment = DataGridViewContentAlignment.MiddleCenter;
                 }
                 catch { }
             }
@@ -3343,7 +4272,7 @@ namespace Automatic_Storage
         /// 同時設定 MinimumWidth 以防某些欄位被壓縮過小。只顯示垂直捲軸。
         /// </summary>
         /// <param name="dgv">目標 DataGridView</param>
-        private void AutoSizeColumnsFillNoHorizontalScroll(DataGridView dgv)
+        private void AutoSizeColumnsFillNoHorizontalScroll(DataGridView? dgv)
         {
             if (dgv == null) return;
             try
@@ -3376,7 +4305,7 @@ namespace Automatic_Storage
                     }
                 }
 
-                // 計算可用寬度（扣除垂直捲軸可能佔的空間）
+
                 int totalWidth = dgv.ClientSize.Width;
                 int vscrollWidth = SystemInformation.VerticalScrollBarWidth;
                 bool needVScroll = dgv.Rows.Count > dgv.DisplayedRowCount(true);
@@ -3691,17 +4620,18 @@ namespace Automatic_Storage
 
             // Timing instrumentation removed: swHeader/swScan/swRead/swWrite
             // var swHeader = System.Diagnostics.Stopwatch.StartNew();
-            // var swScan = new System.Diagnostics.Stopwatch();
-            // var swRead = new System.Diagnostics.Stopwatch();
-            // var swWrite = new System.Diagnostics.Stopwatch();
+            var swAll = System.Diagnostics.Stopwatch.StartNew();
+            var swScan = new System.Diagnostics.Stopwatch();
+            var swRead = new System.Diagnostics.Stopwatch();
+            var swWrite = new System.Diagnostics.Stopwatch();
             int formulaCellCount = 0;
 
-            // Fast path: for .xlsx/.xls use NPOI to read values quickly and avoid COM;
-            // Optional: also prefer NPOI for .xlsm (controlled by appSettings: PreferNpoiForXlsm=true)
+            // Fast path: for .xlsx/.xls/.xlsm attempt NPOI first to read values quickly and avoid COM.
+            // For .xlsm we try NPOI regardless of the app setting; if it fails we fall back to the COM interop path.
             var ext = Path.GetExtension(excelPath)?.ToLowerInvariant() ?? string.Empty;
             bool preferNpoiForXlsm = false;
-            try { preferNpoiForXlsm = IsLogEnabled("PreferNpoiForXlsm"); } catch { preferNpoiForXlsm = false; }
-            if (ext == ".xlsx" || ext == ".xls" || (ext == ".xlsm" && preferNpoiForXlsm))
+            try { preferNpoiForXlsm = (ConfigurationManager.AppSettings["PreferNpoiForXlsm"] ?? string.Empty).ToLowerInvariant() == "true"; } catch { preferNpoiForXlsm = false; }
+            if (ext == ".xlsx" || ext == ".xls" || ext == ".xlsm")
             {
                 try
                 {
@@ -3710,171 +4640,237 @@ namespace Automatic_Storage
                     // var swNpoiRead = new System.Diagnostics.Stopwatch();
                     // var swNpoiWrite = new System.Diagnostics.Stopwatch();
                     // Read sheet with NPOI and write values into uiTable
-                    using (var fs = File.OpenRead(excelPath))
+                    string? __npoiTmpCopy = null;
+                    FileStream? __npoiFs = null;
+                    try
                     {
-                        IWorkbook nwb = null;
-                        // .xls → HSSFWorkbook；.xlsx / .xlsm(當 PreferNpoiForXlsm=true) → XSSFWorkbook
-                        if (ext == ".xls")
-                        {
-                            nwb = new HSSFWorkbook(fs);
-                        }
-                        else // .xlsx 或 .xlsm（在 preferNpoiForXlsm 啟用時會進此分支）
-                        {
-                            nwb = new XSSFWorkbook(fs);
-                        }
-                        if (nwb == null || nwb.NumberOfSheets <= 0) throw new InvalidOperationException("No sheets");
-                        var sheet = nwb.GetSheetAt(0);
-                        // Determine header row similar to other loaders
-                        int headerRowIdx = -1; int bestCount = -1; int scanLimit = Math.Min(10, sheet.LastRowNum + 1);
                         try
                         {
-                            if (sheet.LastRowNum >= 2)
+                            // Try to open with shared read to avoid IOException when another process has file open for read-only
+                            __npoiFs = File.Open(excelPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                        }
+                        catch (IOException)
+                        {
+                            // If original file cannot be opened (locked exclusively), try making a temp copy and open that
+                            try
                             {
-                                var prefRow = sheet.GetRow(2);
-                                if (prefRow != null)
-                                {
-                                    int cnt = 0;
-                                    int first = prefRow.FirstCellNum >= 0 ? prefRow.FirstCellNum : 0;
-                                    int last = prefRow.LastCellNum >= 0 ? prefRow.LastCellNum : first;
-                                    for (int c = first; c <= last; c++) { var cell = prefRow.GetCell(c); if (cell != null && !string.IsNullOrWhiteSpace(cell.ToString())) cnt++; }
-                                    if (cnt > 0) headerRowIdx = 2;
-                                }
+                                __npoiTmpCopy = Path.Combine(Path.GetTempPath(), Path.GetFileNameWithoutExtension(excelPath) + "_tmp" + Path.GetExtension(excelPath));
+                                File.Copy(excelPath, __npoiTmpCopy, true);
+                                __npoiFs = File.Open(__npoiTmpCopy, FileMode.Open, FileAccess.Read, FileShare.Read);
+                                /*花費時間*/
+                                //try { _ = System.Threading.Tasks.Task.Run(() => Automatic_Storage.Utilities.Logger.LogInfoAsync($"ReplaceFormulasWithValuesFromExcel: NPOI using temp copy {__npoiTmpCopy}")); } catch { }
                             }
-                        }
-                        catch { headerRowIdx = -1; }
-                        if (headerRowIdx < 0)
-                        {
-                            for (int r = 0; r < scanLimit; r++)
+                            catch (Exception copyEx)
                             {
-                                var row = sheet.GetRow(r);
-                                if (row == null) continue;
-                                int count = 0;
-                                int first = row.FirstCellNum >= 0 ? row.FirstCellNum : 0;
-                                int last = row.LastCellNum >= 0 ? row.LastCellNum : first;
-                                for (int c = first; c <= last; c++) { var cell = row.GetCell(c); if (cell != null && !string.IsNullOrWhiteSpace(cell.ToString())) count++; }
-                                if (count > bestCount) { bestCount = count; headerRowIdx = r; }
+                                // rethrow original open exception semantics to be caught by outer NPOI fallback
+                                throw new IOException("Failed to open or copy file for NPOI read", copyEx);
                             }
-                        }
-                        if (headerRowIdx < 0) throw new InvalidOperationException("No header");
-                        // 以欄名對齊：建立 NPOI 欄位索引 -> DataTable 欄位索引 的映射
-                        var headerRow = sheet.GetRow(headerRowIdx);
-                        int maxCol = headerRow?.LastCellNum >= 0 ? headerRow.LastCellNum : 0;
-                        // Use centralized sanitizer for header normalization to keep behaviour consistent
-                        var uiNameToIndex = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-                        for (int i = 0; i < uiTable.Columns.Count; i++)
-                        {
-                            var nm = uiTable.Columns[i].ColumnName ?? string.Empty;
-                            var san = SanitizeHeaderForMatch(nm);
-                            if (!uiNameToIndex.ContainsKey(san)) uiNameToIndex[san] = i;
-                        }
-                        var columnMap = new List<(int uiIdx, int npoiIdx, string name)>();
-                        for (int c = 0; c < maxCol; c++)
-                        {
-                            var cell = headerRow?.GetCell(c);
-                            var rawName = cell?.ToString();
-                            if (string.IsNullOrWhiteSpace(rawName)) continue;
-                            var san = SanitizeHeaderForMatch(rawName);
-                            if (string.IsNullOrEmpty(san)) continue;
-                            if (uiNameToIndex.TryGetValue(san, out int uiIdx))
-                            {
-                                columnMap.Add((uiIdx, c, rawName));
-                            }
-                        }
-                        if (columnMap.Count == 0)
-                        {
-                            throw new InvalidOperationException("Header mapping failed between Excel and DataTable");
                         }
 
-                        // Write values to DataTable rows (matching uiTable rows by index)
-                        int writeRow = 0;
-                        // swNpoiRead.Start(); // timing removed
-                        try
+                        if (__npoiFs == null) throw new IOException("Failed to acquire file stream for NPOI");
+                        using (var fs = __npoiFs)
                         {
-                            // 加速大量寫入：暫停約束/索引/事件
-                            uiTable.BeginLoadData();
-                            for (int r = headerRowIdx + 1; r <= sheet.LastRowNum && writeRow < uiTable.Rows.Count; r++)
+                            IWorkbook? nwb = null;
+                            // .xls → HSSFWorkbook；.xlsx / .xlsm(當 PreferNpoiForXlsm=true) → XSSFWorkbook
+                            if (ext == ".xls")
                             {
-                                var row = sheet.GetRow(r);
-                                if (row == null) continue;
-                                var dr = uiTable.Rows[writeRow];
-                                bool any = false;
-                                for (int i = 0; i < columnMap.Count; i++)
+                                nwb = new HSSFWorkbook(fs);
+                            }
+                            else // .xlsx 或 .xlsm（在 preferNpoiForXlsm 啟用時會進此分支）
+                            {
+                                nwb = new XSSFWorkbook(fs);
+                            }
+                            if (nwb == null || nwb.NumberOfSheets <= 0) throw new InvalidOperationException("No sheets");
+                            var sheet = nwb.GetSheetAt(0);
+                            var evaluator = nwb.GetCreationHelper().CreateFormulaEvaluator();
+                            // Determine header row similar to other loaders
+                            int headerRowIdx = -1; int bestCount = -1; int scanLimit = Math.Min(10, sheet.LastRowNum + 1);
+                            try
+                            {
+                                if (sheet.LastRowNum >= 2)
                                 {
-                                    var (uiIdx, npoiIdx, _) = columnMap[i];
-                                    var cell = row.GetCell(npoiIdx);
-                                    object val = null;
-                                    try
+                                    var prefRow = sheet.GetRow(2);
+                                    if (prefRow != null)
                                     {
-                                        if (cell != null)
+                                        int cnt = 0;
+                                        int first = prefRow.FirstCellNum >= 0 ? prefRow.FirstCellNum : 0;
+                                        int last = prefRow.LastCellNum >= 0 ? prefRow.LastCellNum : first;
+                                        for (int c = first; c <= last; c++) { var cell = prefRow.GetCell(c); if (cell != null && !string.IsNullOrWhiteSpace(cell.ToString())) cnt++; }
+                                        if (cnt > 0) headerRowIdx = 2;
+                                    }
+                                }
+                            }
+                            catch { headerRowIdx = -1; }
+                            if (headerRowIdx < 0)
+                            {
+                                for (int r = 0; r < scanLimit; r++)
+                                {
+                                    var row = sheet.GetRow(r);
+                                    if (row == null) continue;
+                                    int count = 0;
+                                    int first = row.FirstCellNum >= 0 ? row.FirstCellNum : 0;
+                                    int last = row.LastCellNum >= 0 ? row.LastCellNum : first;
+                                    for (int c = first; c <= last; c++) { var cell = row.GetCell(c); if (cell != null && !string.IsNullOrWhiteSpace(cell.ToString())) count++; }
+                                    if (count > bestCount) { bestCount = count; headerRowIdx = r; }
+                                }
+                            }
+                            if (headerRowIdx < 0) throw new InvalidOperationException("No header");
+                            // 以欄名對齊：建立 NPOI 欄位索引 -> DataTable 欄位索引 的映射
+                            var headerRow = sheet.GetRow(headerRowIdx);
+                            int maxCol = headerRow?.LastCellNum >= 0 ? headerRow.LastCellNum : 0;
+                            // Use centralized sanitizer for header normalization to keep behaviour consistent
+                            var uiNameToIndex = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                            for (int i = 0; i < uiTable.Columns.Count; i++)
+                            {
+                                var nm = uiTable.Columns[i].ColumnName ?? string.Empty;
+                                var san = SanitizeHeaderForMatch(nm);
+                                if (!uiNameToIndex.ContainsKey(san)) uiNameToIndex[san] = i;
+                            }
+                            var columnMap = new List<(int uiIdx, int npoiIdx, string name)>();
+                            for (int c = 0; c < maxCol; c++)
+                            {
+                                var cell = headerRow?.GetCell(c);
+                                var rawName = cell?.ToString();
+                                if (string.IsNullOrWhiteSpace(rawName)) continue;
+                                var san = SanitizeHeaderForMatch(rawName ?? string.Empty);
+                                if (string.IsNullOrEmpty(san)) continue;
+                                if (uiNameToIndex.TryGetValue(san, out int uiIdx))
+                                {
+                                    columnMap.Add((uiIdx, c, rawName ?? string.Empty));
+                                }
+                            }
+                            if (columnMap.Count == 0)
+                            {
+                                throw new InvalidOperationException("Header mapping failed between Excel and DataTable");
+                            }
+
+                            // Write values to DataTable rows (matching uiTable rows by index)
+                            int writeRow = 0;
+                            // NPOI detailed timing
+                            // swNpoiRead.Start(); // legacy
+                            try
+                            {
+                                // 加速大量寫入：暫停約束/索引/事件
+                                uiTable.BeginLoadData();
+                                for (int r = headerRowIdx + 1; r <= sheet.LastRowNum && writeRow < uiTable.Rows.Count; r++)
+                                {
+                                    var row = sheet.GetRow(r);
+                                    if (row == null) continue;
+                                    var dr = uiTable.Rows[writeRow];
+                                    bool any = false;
+                                    for (int i = 0; i < columnMap.Count; i++)
+                                    {
+                                        var (uiIdx, npoiIdx, _) = columnMap[i];
+                                        var cell = row.GetCell(npoiIdx);
+                                        object? val = null;
+                                        try
                                         {
-                                            // Count formula cells and try to use cached formula result when available
-                                            if (cell.CellType == NPOI.SS.UserModel.CellType.Formula)
+                                            if (cell != null)
                                             {
-                                                formulaCellCount++;
-                                                var cached = cell.CachedFormulaResultType;
-                                                switch (cached)
+                                                // Count formula cells and try to use cached formula result when available
+                                                if (cell.CellType == NPOI.SS.UserModel.CellType.Formula)
                                                 {
-                                                    case NPOI.SS.UserModel.CellType.Numeric:
-                                                        val = cell.NumericCellValue; break;
-                                                    case NPOI.SS.UserModel.CellType.String:
-                                                        val = cell.StringCellValue; break;
-                                                    case NPOI.SS.UserModel.CellType.Boolean:
-                                                        val = cell.BooleanCellValue; break;
-                                                    case NPOI.SS.UserModel.CellType.Error:
-                                                        val = cell.ErrorCellValue; break;
-                                                    default:
-                                                        val = cell?.ToString() ?? string.Empty; break;
+                                                    swRead.Start();
+                                                    formulaCellCount++;
+                                                    var cached = cell.CachedFormulaResultType;
+                                                    // If cached result exists, use it; otherwise evaluate formula with evaluator
+                                                    if (cached == NPOI.SS.UserModel.CellType.Unknown)
+                                                    {
+                                                        try
+                                                        {
+                                                            var evaluated = evaluator.Evaluate(cell);
+                                                            if (evaluated != null)
+                                                            {
+                                                                switch (evaluated.CellType)
+                                                                {
+                                                                    case NPOI.SS.UserModel.CellType.Numeric: val = evaluated.NumberValue; break;
+                                                                    case NPOI.SS.UserModel.CellType.String: val = evaluated.StringValue; break;
+                                                                    case NPOI.SS.UserModel.CellType.Boolean: val = evaluated.BooleanValue; break;
+                                                                    case NPOI.SS.UserModel.CellType.Error: val = evaluated.ErrorValue; break;
+                                                                    default: val = evaluated.FormatAsString(); break;
+                                                                }
+                                                            }
+                                                        }
+                                                        catch { /* ignore evaluator failure and fallback to cached logic below */ }
+                                                    }
+                                                    swRead.Stop();
+                                                    switch (cached)
+                                                    {
+                                                        case NPOI.SS.UserModel.CellType.Numeric:
+                                                            val = cell.NumericCellValue; break;
+                                                        case NPOI.SS.UserModel.CellType.String:
+                                                            val = cell.StringCellValue; break;
+                                                        case NPOI.SS.UserModel.CellType.Boolean:
+                                                            val = cell.BooleanCellValue; break;
+                                                        case NPOI.SS.UserModel.CellType.Error:
+                                                            val = cell.ErrorCellValue; break;
+                                                        default:
+                                                            val = cell?.ToString() ?? string.Empty; break;
+                                                    }
                                                 }
-                                            }
-                                            else
-                                            {
-                                                switch (cell.CellType)
+                                                else
                                                 {
-                                                    case NPOI.SS.UserModel.CellType.Numeric: val = cell.NumericCellValue; break;
-                                                    case NPOI.SS.UserModel.CellType.String: val = cell.StringCellValue; break;
-                                                    case NPOI.SS.UserModel.CellType.Boolean: val = cell.BooleanCellValue; break;
-                                                    case NPOI.SS.UserModel.CellType.Error: val = cell.ErrorCellValue; break;
-                                                    default: val = cell?.ToString() ?? string.Empty; break;
+                                                    swRead.Start();
+                                                    switch (cell.CellType)
+                                                    {
+                                                        case NPOI.SS.UserModel.CellType.Numeric: val = cell.NumericCellValue; break;
+                                                        case NPOI.SS.UserModel.CellType.String: val = cell.StringCellValue; break;
+                                                        case NPOI.SS.UserModel.CellType.Boolean: val = cell.BooleanCellValue; break;
+                                                        case NPOI.SS.UserModel.CellType.Error: val = cell.ErrorCellValue; break;
+                                                        default: val = cell?.ToString() ?? string.Empty; break;
+                                                    }
+                                                    swRead.Stop();
                                                 }
                                             }
                                         }
-                                    }
-                                    catch { val = cell?.ToString() ?? string.Empty; }
+                                        catch { val = cell?.ToString() ?? string.Empty; }
 
-                                    // write value (preserve types where reasonable) - 以 uiIdx 寫入對應 DataTable 欄位
-                                    try
-                                    {
-                                        // swNpoiWrite.Start(); // timing removed
-                                        if (val == null) { dr[uiIdx] = DBNull.Value; }
-                                        else
+                                        // write value (preserve types where reasonable) - 以 uiIdx 寫入對應 DataTable 欄位
+                                        try
                                         {
-                                            // treat empty strings as DB null
-                                            if (val is string s)
-                                            {
-                                                if (string.IsNullOrWhiteSpace(s)) dr[uiIdx] = DBNull.Value; else dr[uiIdx] = s;
-                                                any = any || !string.IsNullOrWhiteSpace(s);
-                                            }
+                                            swWrite.Start();
+                                            if (val == null) { dr[uiIdx] = DBNull.Value; }
                                             else
                                             {
-                                                dr[uiIdx] = val;
-                                                any = true;
+                                                // treat empty strings as DB null
+                                                if (val is string s)
+                                                {
+                                                    if (string.IsNullOrWhiteSpace(s)) dr[uiIdx] = DBNull.Value; else dr[uiIdx] = s;
+                                                    any = any || !string.IsNullOrWhiteSpace(s);
+                                                }
+                                                else
+                                                {
+                                                    dr[uiIdx] = val;
+                                                    any = true;
+                                                }
                                             }
                                         }
+                                        catch { }
+                                        finally { try { swWrite.Stop(); } catch { } }
                                     }
-                                    catch { }
-                                    finally { try { /* timing removed */ } catch { } }
+                                    if (any) writeRow++; // only advance when row had any data
                                 }
-                                if (any) writeRow++; // only advance when row had any data
+                            }
+                            finally
+                            {
+                                try { uiTable.EndLoadData(); } catch { }
+                                try { /* timing removed */ } catch { }
                             }
                         }
-                        finally
+                    }
+                    finally
+                    {
+                        // ensure temp copy removed
+                        if (!string.IsNullOrEmpty(__npoiTmpCopy))
                         {
-                            try { uiTable.EndLoadData(); } catch { }
-                            try { /* timing removed */ } catch { }
+                            try { File.Delete(__npoiTmpCopy); } catch { }
                         }
                     }
                     // Timing removed for scan/read/write/header
                     try { /* timing removed: swScan/ swRead/ swWrite/ swHeader */ } catch { }
+                    // Log NPOI success with formula count and elapsed
+                    /*花費時間*/
+                    //try { _ = System.Threading.Tasks.Task.Run(() => Automatic_Storage.Utilities.Logger.LogInfoAsync($"ReplaceFormulasWithValuesFromExcel: PathUsed=NPOI, formulaCells={formulaCellCount}, elapsed={swAll.ElapsedMilliseconds}ms")); } catch { }
                     // 測試用效能分析提示已移除
                     return;
                 }
@@ -3883,12 +4879,10 @@ namespace Automatic_Storage
                     // On any failure, fall back to Interop chunked path below
                     try
                     {
-                        var sb = new System.Text.StringBuilder();
-                        sb.AppendLine($"Time: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
-                        sb.AppendLine($"File: {excelPath}");
-                        sb.AppendLine("Exception:");
-                        sb.AppendLine(ex.ToString());
-                        // Debug write removed
+                        // Debug diagnostics suppressed for NPOI failure fallback
+                        try { _ = System.Threading.Tasks.Task.Run(() => Automatic_Storage.Utilities.Logger.LogErrorAsync(ex.ToString())); } catch { }
+                        /*花費間*/
+                        //try { _ = System.Threading.Tasks.Task.Run(() => Automatic_Storage.Utilities.Logger.LogErrorAsync($"ReplaceFormulasWithValuesFromExcel: NPOI failed, falling back to COM, elapsed={swAll.ElapsedMilliseconds}ms, formulaCells={formulaCellCount}, ex={ex.Message}")); } catch { }
                     }
                     catch { }
                 }
@@ -3918,7 +4912,7 @@ namespace Automatic_Storage
                     int maxHeaderCheck = Math.Min(5, rowCount);
                     int limitCols = Math.Min(colCount, uiTable.Columns.Count);
                     Excel.Range? headerRange = null;
-                    object headerValsObj = null;
+                    object? headerValsObj = null;
                     try { headerRange = used.Range[used.Cells[1, 1], used.Cells[maxHeaderCheck, limitCols]]; } catch { headerRange = null; }
                     try { headerValsObj = headerRange?.Value2; } catch { headerValsObj = null; }
 
@@ -3995,7 +4989,7 @@ namespace Automatic_Storage
                     {
                         var hv = (used.Cells[excelHeaderRow, c] as Excel.Range)?.Value2;
                         var hn = hv?.ToString();
-                        var key = SanitizeHeaderForMatch(hn);
+                        var key = SanitizeHeaderForMatch(hn ?? string.Empty);
                         if (string.IsNullOrEmpty(key)) continue;
                         if (uiMap.TryGetValue(key, out int uiIdx))
                         {
@@ -4010,7 +5004,7 @@ namespace Automatic_Storage
                 // swScan.Start(); // timing removed
 
                 // 以一次性批次讀取整個資料區塊的值，減少每個 cell 的 COM 呼叫
-                Excel.Range dataRange = null;
+                Excel.Range? dataRange = null;
                 try
                 {
                     dataRange = used.Range[used.Cells[excelStartRow, 1], used.Cells[excelStartRow + maxRowsToCheck - 1, maxColsToCheck]];
@@ -4058,8 +5052,8 @@ namespace Automatic_Storage
                         if (token.IsCancellationRequested) throw new OperationCanceledException();
                         int thisChunkRows = Math.Min(chunkSize, maxRowsToCheck - offset);
 
-                        Excel.Range chunkRange = null;
-                        object chunkValues = null;
+                        Excel.Range? chunkRange = null;
+                        object? chunkValues = null;
                         try
                         {
                             chunkRange = used.Range[used.Cells[excelStartRow + offset, 1], used.Cells[excelStartRow + offset + thisChunkRows - 1, maxColsToCheck]];
@@ -4150,10 +5144,10 @@ namespace Automatic_Storage
                                 {
                                     try
                                     {
-                                        Excel.Range cell = null;
+                                        Excel.Range? cell = null;
                                         try { cell = (used.Cells[excelStartRow + offset + r, excelCol] as Excel.Range); } catch { cell = null; }
                                         if (cell == null) continue;
-                                        object val = null;
+                                        object? val = null;
                                         try { val = cell.Value2; } catch { val = null; }
                                         if (val == null) { dr[uiIdx] = DBNull.Value; continue; }
                                         if (val is double || val is float || val is int || val is decimal)
@@ -4193,14 +5187,14 @@ namespace Automatic_Storage
                 // 還原 Excel 應用程式狀態
                 try { if (xlApp != null) { try { xlApp.Calculation = prevCalc; } catch { } try { xlApp.EnableEvents = prevEnableEvents; } catch { } try { xlApp.ScreenUpdating = prevScreenUpdating; } catch { } } } catch { }
                 try { if (xlApp != null) { xlApp.Quit(); ReleaseComObjectSafe(xlApp); } } catch { }
+                /*花費時間紀錄移除*/
+                //try { _ = System.Threading.Tasks.Task.Run(() => Automatic_Storage.Utilities.Logger.LogInfoAsync($"ReplaceFormulasWithValuesFromExcel: PathUsed=COM, formulaCells={formulaCellCount}, elapsed={swAll.ElapsedMilliseconds}ms, scan={swScan.ElapsedMilliseconds}ms, read={swRead.ElapsedMilliseconds}ms, write={swWrite.ElapsedMilliseconds}ms")); } catch { }
             }
 
             // 測試用效能分析提示已移除
         }
 
         #endregion
-
-        #region Input & update
 
         #region Input Handlers
 
@@ -4232,11 +5226,15 @@ namespace Automatic_Storage
             if (e.KeyCode == Keys.Enter)
             {
                 e.SuppressKeyPress = true;
-                string input = this.txt備料單料號.Text?.Trim();
-                if (!string.IsNullOrEmpty(input))
+                string? input = this.txt備料單料號.Text?.Trim();
+                if (string.IsNullOrEmpty(input))
                 {
-                    ProcessMaterialInput(input);
+                    try { SafeShowMessage("料號不可為空，請輸入料號。", "輸入錯誤", MessageBoxButtons.OK, MessageBoxIcon.Warning); } catch { }
+                    try { this.txt備料單料號.Focus(); this.txt備料單料號.SelectAll(); } catch { }
+                    return;
                 }
+
+                ProcessMaterialInput(input);
             }
         }
 
@@ -4301,8 +5299,8 @@ namespace Automatic_Storage
                     string? matKey = null;
                     if (e.RowIndex >= 0 && e.RowIndex < dgv.Rows.Count)
                     {
-                        if (chCol >= 0) matKey = dgv.Rows[e.RowIndex].Cells[chCol].Value?.ToString();
-                        if (string.IsNullOrWhiteSpace(matKey) && custCol >= 0) matKey = dgv.Rows[e.RowIndex].Cells[custCol].Value?.ToString();
+                        if (chCol >= 0) matKey = dgv.Rows[e.RowIndex].Cells[chCol].Value?.ToString() ?? string.Empty;
+                        if (string.IsNullOrWhiteSpace(matKey) && custCol >= 0) matKey = dgv.Rows[e.RowIndex].Cells[custCol].Value?.ToString() ?? string.Empty;
                     }
                     matKey = NormalizeMaterialKey(matKey ?? string.Empty);
 
@@ -4366,74 +5364,14 @@ namespace Automatic_Storage
                     }
                 }
             }
-            catch (Exception ex)
+            catch (Exception)
             {
                 // 記錄日誌，避免在格式化事件中拋出異常導致程式崩潰
                 // Debug write removed
             }
         }
 
-        /// <summary>
-        /// 數量輸入框 KeyDown 事件: 按下 Enter 執行數量更新與累加邏輯
-        /// </summary>
-        private void Txt備料單數量_KeyDown(object sender, KeyEventArgs e)
-        {
-            if (e.KeyCode == Keys.Enter)
-            {
-                e.SuppressKeyPress = true;
-                var qtyText = this.txt備料單數量.Text?.Trim();
-                // 診斷：記錄按下 Enter 時的游標/UseWaitCursor 狀態，方便追蹤殘留情況
-                // Enter pressed snapshot diagnostic removed
-
-                ApplyQuantityToSelectedRow(qtyText);
-            }
-        }
-
-        /// <summary>
-        /// 數量輸入框 KeyPress 事件: 只允許輸入數字
-        /// </summary>
-        private void Txt備料單數量_KeyPress(object sender, KeyPressEventArgs e)
-        {
-            // 允許控制字元 (例如 Backspace, Delete)
-            if (char.IsControl(e.KeyChar)) return;
-
-            // 只允許數字,不允許其他字元(包括小數點、負號等)
-            if (!char.IsDigit(e.KeyChar))
-            {
-                e.Handled = true;
-            }
-        }
-
-        /// <summary>
-        /// 當料號輸入框取得焦點時，清除任何搜尋標示
-        /// </summary>
-        /// <param name="sender">The source of the event.</param>
-        /// <param name="e">The <see cref="EventArgs"/> instance containing the event data.</param>
-        private void Txt備料單料號_Enter(object sender, EventArgs e)
-        {
-            try
-            {
-                // 若目前畫面為可編輯（未鎖定），禁止切換到料號輸入，並提示使用者先按「鎖定」
-                try
-                {
-                    if (!_isEditingLocked)
-                    {
-                        try { if (this.txt備料單料號 != null) this.txt備料單料號.ReadOnly = true; } catch { }
-                        try { SafeShowMessage("目前畫面為可編輯狀態；請先按『鎖定』後再輸入料號。", "提醒", MessageBoxButtons.OK, MessageBoxIcon.Information); } catch { }
-                        try { if (this.btn備料單Unlock != null) this.btn備料單Unlock.Focus(); } catch { }
-                        return;
-                    }
-                }
-                catch { }
-
-                ClearRowHighlights();
-            }
-            catch { }
-        }
-
         #endregion
-
-        #region Processing
 
         /// <summary>
         /// 處理料號輸入: 進行不區分大小寫的模糊比對，標黃並顯示備註
@@ -4451,7 +5389,12 @@ namespace Automatic_Storage
         /// </example>
         private void ProcessMaterialInput(string? input)
         {
-            if (string.IsNullOrEmpty(input)) return;
+            if (string.IsNullOrEmpty(input))
+            {
+                try { SafeShowMessage("料號不可為空，請輸入料號後再比對。", "輸入錯誤", MessageBoxButtons.OK, MessageBoxIcon.Warning); } catch { }
+                try { this.txt備料單料號.Focus(); this.txt備料單料號.SelectAll(); } catch { }
+                return;
+            }
 
             // 找出料號欄位索引
             int chCol = -1, custCol = -1, remarkCol = -1;
@@ -4570,6 +5513,7 @@ namespace Automatic_Storage
             if (matchedCells.Count > 1)
             {
                 try { _lastMatchedRows = matchedCells.Select(x => x.row).ToList(); } catch { }
+                _lastMatchResultType = 2;  // 標示為模糊多筆
                 if (remarkCol >= 0)
                 {
                     var remarkList = matchedCells
@@ -4590,7 +5534,7 @@ namespace Automatic_Storage
                     var firstVisible = matchedCells.FirstOrDefault(x => x.row.Visible);
                     if (firstVisible.row == null)
                         firstVisible = matchedCells[0];
-                    string fill = null;
+                    string? fill = null;
                     if (firstVisible.colIdx >= 0 && firstVisible.row.Cells.Count > firstVisible.colIdx)
                         fill = firstVisible.row.Cells[firstVisible.colIdx].Value?.ToString();
                     if (!string.IsNullOrEmpty(fill)) txt備料單料號.Text = NormalizeForTextboxFill(fill);
@@ -4599,13 +5543,16 @@ namespace Automatic_Storage
                 catch { }
                 try { EnsureCursorRestored(); } catch { }
                 MessageBox.Show($"找到 {matchedCells.Count} 筆模糊匹配結果，其中 {visibleCount} 筆為可見列，已標示為黃色，請確認。", "模糊比對結果", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                // 焦點移到數量欄
+                try { this.txt備料單數量.Focus(); this.txt備料單數量.SelectAll(); } catch { }
                 return;
             }
 
             // 單筆比對：自動回填料號並記錄該列
             var matched = matchedCells[0];
             try { _lastMatchedRows = new List<DataGridViewRow> { matched.row }; } catch { }
-            string fillValue = null;
+            _lastMatchResultType = 1;  // 標示為精確單筆
+            string? fillValue = null;
             if (matched.colIdx >= 0 && matched.row.Cells.Count > matched.colIdx && matched.row.Cells[matched.colIdx].Value != null)
                 fillValue = matched.row.Cells[matched.colIdx].Value?.ToString() ?? string.Empty;
 
@@ -4655,7 +5602,7 @@ namespace Automatic_Storage
         /// </example>
         private bool TryParseNonNegativeInteger(string? qtyText, out int value, out string errMsg)
         {
-            value = 0; errMsg = null;
+            value = 0; errMsg = string.Empty;
             try
             {
                 if (string.IsNullOrWhiteSpace(qtyText))
@@ -4723,6 +5670,121 @@ namespace Automatic_Storage
         #endregion
 
         /// <summary>
+        /// 序列分配數量至多筆比對列：逐筆計算累加量，檢查最後一筆是否超量。
+        /// </summary>
+        /// <param name="remainingQty">待分配的數量</param>
+        /// <param name="rows">要分配的列集合</param>
+        /// <param name="demandCol">需求數量欄位索引</param>
+        /// <param name="shippedCol">已發數量欄位索引</param>
+        /// <param name="allocationResult">分配結果：(列, (分配量, 是否短缺, 是否超量))</param>
+        /// <param name="hasExceeded">是否有超量情況（總供應量超過總需求量即為失敗）</param>
+        /// <returns>若分配成功（總供應量未超過總需求量）則 true；否則 false</returns>
+        private bool ProcessQuantityAllocationSequential(
+            decimal remainingQty,
+            List<DataGridViewRow> rows,
+            int demandCol,
+            int shippedCol,
+            out Dictionary<DataGridViewRow, (decimal allocatedQty, bool isShortage, bool isExceeded)> allocationResult,
+            out bool hasExceeded)
+        {
+            allocationResult = new Dictionary<DataGridViewRow, (decimal, bool, bool)>();
+            hasExceeded = false;
+
+            if (rows == null || rows.Count == 0) return true;
+
+            // 先計算總需求與總已發量
+            decimal totalDemand = 0;
+            decimal totalCurrentShipped = 0;
+            foreach (var row in rows)
+            {
+                if (row == null) continue;
+                decimal demandQty = 0;
+                if (demandCol >= 0 && demandCol < row.Cells.Count)
+                {
+                    string demandStr = row.Cells[demandCol].Value?.ToString()?.Trim() ?? "0";
+                    TryParseDecimalValue(demandStr, out demandQty);
+                }
+                totalDemand += demandQty;
+
+                decimal currentShipped = 0;
+                if (shippedCol >= 0 && shippedCol < row.Cells.Count)
+                {
+                    string shippedStr = row.Cells[shippedCol].Value?.ToString()?.Trim() ?? "0";
+                    TryParseDecimalValue(shippedStr, out currentShipped);
+                }
+                totalCurrentShipped += currentShipped;
+            }
+
+            // 計算總已分配的需求
+            decimal totalNeeded = totalDemand - totalCurrentShipped;
+
+            // 若總供應量超過總需求，判定為超量
+            if (remainingQty > totalNeeded)
+            {
+                hasExceeded = true;
+            }
+
+            decimal remainingToAllocate = remainingQty;
+
+            // 逐筆序列分配
+            for (int i = 0; i < rows.Count; i++)
+            {
+                var row = rows[i];
+                if (row == null) continue;
+
+                // 取得需求量與已發量
+                decimal demandQty = 0;
+                if (demandCol >= 0 && demandCol < row.Cells.Count)
+                {
+                    string demandStr = row.Cells[demandCol].Value?.ToString()?.Trim() ?? "0";
+                    TryParseDecimalValue(demandStr, out demandQty);
+                }
+
+                decimal currentShipped = 0;
+                if (shippedCol >= 0 && shippedCol < row.Cells.Count)
+                {
+                    string shippedStr = row.Cells[shippedCol].Value?.ToString()?.Trim() ?? "0";
+                    TryParseDecimalValue(shippedStr, out currentShipped);
+                }
+
+                // 計算需要分配的量
+                decimal needed = demandQty - currentShipped;
+                decimal allocated = 0;
+                bool isShortage = false;
+                bool isExceeded = false;
+
+                if (needed <= 0)
+                {
+                    // 該列已達量，跳過
+                    allocated = 0;
+                }
+                else if (remainingToAllocate >= needed)
+                {
+                    // 可完全滿足此列需求
+                    allocated = needed;
+                    remainingToAllocate -= allocated;
+                }
+                else if (remainingToAllocate > 0)
+                {
+                    // 部分滿足此列（短缺）
+                    allocated = remainingToAllocate;
+                    isShortage = true;
+                    remainingToAllocate = 0;
+                }
+                else
+                {
+                    // 無剩餘可分配（短缺）
+                    allocated = 0;
+                    isShortage = true;
+                }
+
+                allocationResult[row] = (allocated, isShortage, isExceeded);
+            }
+
+            return !hasExceeded;
+        }
+
+        /// <summary>
         /// 將指定的數量文字套用至目前選取的資料列。
         /// </summary>
         /// <param name="qtyText">要套用的數量字串。</param>
@@ -4747,14 +5809,74 @@ namespace Automatic_Storage
                 return;
             }
 
-            // 必須有比對到的列
-            if (_lastMatchedRows == null || _lastMatchedRows.Count == 0)
+            // 料號欄不可為空：優先以料號欄值做精確比對並建立 _lastMatchedRows
+            string materialInput = this.txt備料單料號?.Text?.Trim() ?? string.Empty;
+            if (string.IsNullOrEmpty(materialInput))
             {
-                try { EnsureCursorRestored(); } catch { }
-                try { SafeShowMessage("請先輸入料號並比對成功(黃色標示)後再輸入數量。", "操作錯誤", MessageBoxButtons.OK, MessageBoxIcon.Warning); } catch { }
-                try { this.txt備料單料號.Focus(); } catch { }
+                try { SafeShowMessage("請先輸入料號後再輸入數量（料號不可為空）。", "操作錯誤", MessageBoxButtons.OK, MessageBoxIcon.Warning); } catch { }
+                try { this.txt備料單料號?.Focus(); this.txt備料單料號?.SelectAll(); } catch { }
                 return;
             }
+
+            // 以料號欄的值做精確比對，建立 _lastMatchedRows（若能找到）
+            try
+            {
+                int chCol = FindColumnIndexByNames(new[] { "昶亨料號" });
+                int custCol = FindColumnIndexByNames(new[] { "客戶料號" });
+                var inputNorm = NormalizeMaterialKey(materialInput);
+                var exactMatches = new List<DataGridViewRow>();
+                if (this.dgv備料單 != null)
+                {
+                    foreach (DataGridViewRow row in this.dgv備料單.Rows)
+                    {
+                        if (row == null || row.IsNewRow) continue;
+                        try
+                        {
+                            if (chCol >= 0 && row.Cells.Count > chCol && row.Cells[chCol].Value != null)
+                            {
+                                var val = row.Cells[chCol].Value?.ToString() ?? string.Empty;
+                                if (!string.IsNullOrEmpty(NormalizeMaterialKey(val)) && NormalizeMaterialKey(val) == inputNorm)
+                                {
+                                    exactMatches.Add(row);
+                                    continue;
+                                }
+                            }
+                            if (custCol >= 0 && row.Cells.Count > custCol && row.Cells[custCol].Value != null)
+                            {
+                                var val = row.Cells[custCol].Value?.ToString() ?? string.Empty;
+                                if (!string.IsNullOrEmpty(NormalizeMaterialKey(val)) && NormalizeMaterialKey(val) == inputNorm)
+                                {
+                                    exactMatches.Add(row);
+                                    continue;
+                                }
+                            }
+                        }
+                        catch { }
+                    }
+                }
+
+                if (exactMatches.Count == 0)
+                {
+                    try { SafeShowMessage("指定的料號在表格中找不到精確匹配，請確認或先按 Enter 進行比對。", "找不到料號", MessageBoxButtons.OK, MessageBoxIcon.Warning); } catch { }
+                    try { this.txt備料單料號?.Focus(); this.txt備料單料號?.SelectAll(); } catch { }
+                    return;
+                }
+
+                try { _lastMatchedRows = exactMatches; } catch { }
+                _lastMatchResultType = exactMatches.Count > 1 ? 2 : 1;
+
+                // 標示精確比對到的格（優先標昶亨料號或客戶料號欄位）
+                try
+                {
+                    foreach (var row in exactMatches)
+                    {
+                        try { if (chCol >= 0 && row.Cells.Count > chCol) row.Cells[chCol].Style.BackColor = _materialHighlightColor; } catch { }
+                        try { if (custCol >= 0 && row.Cells.Count > custCol) row.Cells[custCol].Style.BackColor = _materialHighlightColor; } catch { }
+                    }
+                }
+                catch { }
+            }
+            catch { }
 
             // 判斷檔案類型 (.xlsm 或其他)
             bool isXlsm = !string.IsNullOrEmpty(this.currentExcelPath) &&
@@ -4784,56 +5906,70 @@ namespace Automatic_Storage
                 return;
             }
 
-            // 先檢查所有列是否都不會超量
-            foreach (var row in _lastMatchedRows)
+            // 進行序列分配，檢查最後一筆是否超量
+            bool success = ProcessQuantityAllocationSequential(
+                qty, _lastMatchedRows, demandCol, shippedCol,
+                out var allocationResult, out bool hasExceeded);
+
+            if (!success || hasExceeded)
             {
-                if (row == null) continue;
-                decimal demandQty = 0;
-                if (demandCol < row.Cells.Count)
+                // 分配失敗：顯示警告並還原光標到數量欄
+                try
                 {
-                    string demandStr = row.Cells[demandCol].Value?.ToString()?.Trim() ?? "0";
-                    TryParseDecimalValue(demandStr, out demandQty);
-                }
-                decimal currentShipped = 0;
-                if (shippedCol < row.Cells.Count)
-                {
-                    string shippedStr = row.Cells[shippedCol].Value?.ToString()?.Trim() ?? "0";
-                    TryParseDecimalValue(shippedStr, out currentShipped);
-                }
-                decimal newShipped = currentShipped + qty;
-                if (newShipped > demandQty)
-                {
-                    // 根據檔案類型顯示不同的訊息字句
+                    try { EnsureCursorRestored(); } catch { }
                     string headerMsg = isXlsm ? "發出的數量已超出需求數量" : "發出的數量已超出應領數量";
-                    // Debug log removed
-                    try
+                    
+                    // 計算總需求與總已發量，顯示詳細資訊
+                    decimal totalDemand = 0;
+                    decimal totalCurrentShipped = 0;
+                    
+                    foreach (var row in _lastMatchedRows)
                     {
-                        try { EnsureCursorRestored(); } catch { }
-                        SafeShowMessage(
-                            headerMsg + "\n\n" +
-                            $"目前已發: {currentShipped}\n" +
-                            $"本次輸入: {qty}\n" +
-                            $"累加後: {newShipped}\n" +
-                            $"{(isXlsm ? "需求數量" : "應領數量")}: {demandQty}",
-                            "超量警告",
-                            MessageBoxButtons.OK,
-                            MessageBoxIcon.Warning);
+                        if (row == null) continue;
+                        decimal demandQty = 0;
+                        if (demandCol >= 0 && demandCol < row.Cells.Count)
+                        {
+                            string demandStr = row.Cells[demandCol].Value?.ToString()?.Trim() ?? "0";
+                            TryParseDecimalValue(demandStr, out demandQty);
+                        }
+                        totalDemand += demandQty;
+
+                        decimal currentShipped = 0;
+                        if (shippedCol >= 0 && shippedCol < row.Cells.Count)
+                        {
+                            string shippedStr = row.Cells[shippedCol].Value?.ToString()?.Trim() ?? "0";
+                            TryParseDecimalValue(shippedStr, out currentShipped);
+                        }
+                        totalCurrentShipped += currentShipped;
                     }
-                    catch { }
-                    try { this.txt備料單數量.Focus(); this.txt備料單數量.SelectAll(); } catch { }
-                    return;
+
+                    decimal totalWillShip = totalCurrentShipped + qty;
+
+                    string details = $"目前已發: {totalCurrentShipped}\n本次輸入: {qty}\n累加後: {totalWillShip}\n{(isXlsm ? "需求數量" : "應領數量")}: {totalDemand}";
+
+                    SafeShowMessage(
+                        headerMsg + "\n\n" + details,
+                        "超量警告",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Warning);
                 }
+                catch { }
+                
+                // 焦點回到數量欄，還原輸入
+                try { this.txt備料單數量.Focus(); this.txt備料單數量.SelectAll(); } catch { }
+                return;
             }
 
-            // 全部通過，開始更新與記錄
-
+            // 分配成功：更新所有列的數量，並記錄
             foreach (var row in _lastMatchedRows)
             {
-                if (row == null) continue;
-                // 取得料號：優先使用使用者輸入/比對後回填的 txt 值（代表實際被比對到的欄位），
-                // 若不存在再依序嘗試 昶亨料號 -> 客戶料號
-                string materialCode = null;
-                try { var txtVal = this.txt備料單料號?.Text?.Trim(); if (!string.IsNullOrEmpty(txtVal)) materialCode = txtVal; } catch { }
+                if (row == null || !allocationResult.TryGetValue(row, out var result)) continue;
+                
+                if (result.allocatedQty <= 0) continue;  // 跳過沒有分配的列
+
+                // 取得料號
+                string materialCode = string.Empty;
+                try { var txtVal = this.txt備料單料號?.Text?.Trim() ?? string.Empty; if (!string.IsNullOrEmpty(txtVal)) materialCode = txtVal; } catch { }
 
                 int chCol = FindColumnIndexByNames(new[] { "昶亨料號" });
                 int custCol = FindColumnIndexByNames(new[] { "客戶料號" });
@@ -4842,26 +5978,25 @@ namespace Automatic_Storage
                     try
                     {
                         if (chCol >= 0 && chCol < row.Cells.Count)
-                            materialCode = row.Cells[chCol].Value?.ToString()?.Trim();
+                            materialCode = row.Cells[chCol].Value?.ToString()?.Trim() ?? string.Empty;
                     }
                     catch { }
                     if (string.IsNullOrEmpty(materialCode))
                     {
-                        try { if (custCol >= 0 && custCol < row.Cells.Count) materialCode = row.Cells[custCol].Value?.ToString()?.Trim(); } catch { }
+                        try { if (custCol >= 0 && custCol < row.Cells.Count) materialCode = row.Cells[custCol].Value?.ToString()?.Trim() ?? string.Empty; } catch { }
                     }
-                    if (materialCode == null) materialCode = string.Empty;
                 }
-                // 更新數量
+
+                // 計算新的已發量
                 decimal currentShipped = 0;
-                if (shippedCol < row.Cells.Count)
+                if (shippedCol >= 0 && shippedCol < row.Cells.Count)
                 {
                     string shippedStr = row.Cells[shippedCol].Value?.ToString()?.Trim() ?? "0";
                     TryParseDecimalValue(shippedStr, out currentShipped);
                 }
-                decimal newShipped = currentShipped + qty;
+                decimal newShipped = currentShipped + result.allocatedQty;
 
-                // 嘗試以綁定資料列 (DataRowView) 更新底層 DataRow，因為 DataColumn 可能為 ReadOnly
-                // 若無法使用 DataRow 更新，則退回到直接設定 DataGridView cell（並嘗試暫時解除 ReadOnly）
+                // 更新儲存格
                 try
                 {
                     var dgv = this.dgv備料單;
@@ -4869,7 +6004,7 @@ namespace Automatic_Storage
                     if (row.DataBoundItem is DataRowView drv)
                     {
                         var col = (shippedCol >= 0 && dgv != null && shippedCol < dgv.Columns.Count) ? dgv.Columns[shippedCol] : null;
-                        string dataColName = col?.DataPropertyName;
+                        string? dataColName = col?.DataPropertyName;
                         if (string.IsNullOrEmpty(dataColName)) dataColName = col?.Name;
                         if (!string.IsNullOrEmpty(dataColName) && drv.Row.Table.Columns.Contains(dataColName))
                         {
@@ -4890,7 +6025,6 @@ namespace Automatic_Storage
 
                     if (!updated)
                     {
-                        // fallback: 直接寫入 cell，但先嘗試解除 DataGridViewColumn.ReadOnly
                         try
                         {
                             var col = (shippedCol >= 0 && this.dgv備料單 != null && shippedCol < this.dgv備料單.Columns.Count) ? this.dgv備料單.Columns[shippedCol] : null;
@@ -4899,15 +6033,11 @@ namespace Automatic_Storage
                             row.Cells[shippedCol].Value = newShipped;
                             if (col != null) col.ReadOnly = origDgvReadOnly;
                         }
-                        catch
-                        {
-                            // swallow - UI will remain unchanged but avoid crash
-                        }
+                        catch { }
                     }
                 }
                 catch (System.Data.ReadOnlyException)
                 {
-                    // 最後的保險：若仍拋出唯讀例外，嘗試短暫解除 DataGridViewColumn.ReadOnly
                     try
                     {
                         var col = (shippedCol >= 0 && this.dgv備料單 != null && shippedCol < this.dgv備料單.Columns.Count) ? this.dgv備料單.Columns[shippedCol] : null;
@@ -4921,9 +6051,9 @@ namespace Automatic_Storage
                 catch { }
 
                 // 寫入記錄
-                #region 寫入記錄
                 try
                 {
+                    // 寫入記錄（只記錄一筆，總數量）
                     _records.Add(new Dto.記錄Dto
                     {
                         刷入時間 = DateTime.Now,
@@ -4933,23 +6063,26 @@ namespace Automatic_Storage
                     });
                 }
                 catch { }
-                #endregion
             }
 
-            // 標示表單為已修改（需儲存），但若目前暫停 dirty 標記則略過
+            // 標示表單為已修改
             try { if (!_suspendDirtyMarking) _isDirty = true; } catch { }
 
             // 移除黃色標示
             ClearRowHighlights();
 
             // 清空輸入欄位
-            this.txt備料單料號.Text = "";
+            if (this.txt備料單料號 != null) this.txt備料單料號.Text = "";
             this.txt備料單數量.Text = "";
 
-            // 將焦點移回料號欄位
-            this.txt備料單料號.Focus();
+            // 注意：抑制旗標已在 Txt備料單數量_KeyDown 中提前設置，不需要再設置
+            // 確保抑制旗標未被意外重設
+            if (!_suppressNextTxt料號EnterPrompt)
+            {
+                try { _suppressNextTxt料號EnterPrompt = true; } catch { }
+            }
 
-            // 更新快速索引與快取，然後重新標示短缺(如果實發仍小於需求，保持紅色提示)
+            // 更新快速索引與快取
             try
             {
                 try { BuildMaterialIndex(); } catch { }
@@ -4957,22 +6090,11 @@ namespace Automatic_Storage
             }
             catch { }
 
-            // 在完成成功流程後，額外記錄 UI/游標快照並確保游標被還原
-            try
-            {
-                var sb = new System.Text.StringBuilder();
-                sb.AppendLine("[APPLY_QTY_COMPLETED_SNAPSHOT]");
-                try { sb.AppendLine($"  Application.UseWaitCursor={Application.UseWaitCursor}"); } catch { }
-                try { sb.AppendLine($"  Cursor.Current={Cursor.Current}"); } catch { }
-                try { sb.AppendLine($"  this.Cursor={this.Cursor}"); } catch { }
-                // Debug log removed
-            }
-            catch { }
+            // 成功焦點：回到料號欄位
+            try { this.txt備料單料號?.Focus(); } catch { }
 
             try { EnsureCursorRestored(); } catch { }
         }
-
-        #endregion
 
         #region Logging & Safe UI Helpers
         /// <summary>
@@ -5026,8 +6148,8 @@ namespace Automatic_Storage
                 return func();
             }
 
-            T result = default(T);
-            Exception captured = null;
+            T result = default!;
+            Exception? captured = null;
             var thread = new Thread(() =>
             {
                 try { result = func(); }
@@ -5061,7 +6183,7 @@ namespace Automatic_Storage
             }
             catch
             {
-                return default(T);
+                return default!;
             }
         }
 
@@ -5103,7 +6225,7 @@ namespace Automatic_Storage
                 return false;
 
             //var logPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory ?? Directory.GetCurrentDirectory(), "excel_write_error.log");
-            var logMsg = new System.Text.StringBuilder();
+            // debug logging removed: logMsg assembly eliminated to avoid writing local debug files
 
             // 【策略】嘗試以獨佔模式打開檔案（最可靠）
             const int maxRetries = 5;
@@ -5120,17 +6242,12 @@ namespace Automatic_Storage
                     fs.Dispose();
 
                     // 成功 = 檔案自由
-                    logMsg.Clear();
-                    logMsg.AppendLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] [IsFileLocked] SUCCESS on attempt {attempt + 1}: File is FREE");
-                    // try { WriteDebugFile(logPath, logMsg.ToString()); } catch { }
+                    // debug: success detail removed
                     return false;
                 }
-                catch (IOException ioEx)
+                catch (IOException)
                 {
-                    // IOException = 檔案被鎖定
-                    logMsg.Clear();
-                    logMsg.AppendLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] [IsFileLocked] Attempt {attempt + 1}/{maxRetries}: IOException - {ioEx.Message}");
-                    //try { WriteDebugFile(logPath, logMsg.ToString()); } catch { }
+                    // IOException = 檔案被鎖定 (diagnostic suppressed)
 
                     if (attempt < maxRetries - 1)
                     {
@@ -5138,26 +6255,18 @@ namespace Automatic_Storage
                     }
                     else
                     {
-                        logMsg.Clear();
-                        logMsg.AppendLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] [IsFileLocked] FINAL: All {maxRetries} attempts failed, file is LOCKED");
-                        //try { WriteDebugFile(logPath, logMsg.ToString()); } catch { }
+                        // FINAL: All attempts failed, file is LOCKED (diagnostic suppressed)
                         return true;
                     }
                 }
-                catch (UnauthorizedAccessException uaEx)
+                catch (UnauthorizedAccessException)
                 {
-                    // 權限不足
-                    logMsg.Clear();
-                    logMsg.AppendLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] [IsFileLocked] UnauthorizedAccessException: {uaEx.Message}");
-                    //try { WriteDebugFile(logPath, logMsg.ToString()); } catch { }
+                    // 權限不足 (diagnostic suppressed)
                     return true;
                 }
-                catch (Exception ex)
+                catch (Exception)
                 {
-                    // 其他異常
-                    logMsg.Clear();
-                    logMsg.AppendLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] [IsFileLocked] Unexpected exception {ex.GetType().Name}: {ex.Message}");
-                    // try { File.AppendAllText(logPath, logMsg.ToString()); } catch { }
+                    // 其他異常 (diagnostic suppressed)
 
                     if (attempt < maxRetries - 1)
                     {
@@ -5174,10 +6283,7 @@ namespace Automatic_Storage
                 }
             }
 
-            // 預設：所有重試都失敗
-            logMsg.Clear();
-            logMsg.AppendLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] [IsFileLocked] FINAL DEFAULT: Returning TRUE (locked)");
-            //try { WriteDebugFile(logPath, logMsg.ToString()); } catch { }
+            // 預設：所有重試都失敗 (diagnostic suppressed)
             return true;
         }
         #endregion
@@ -5198,13 +6304,13 @@ namespace Automatic_Storage
                 // 優先使用集中式的正規化函式以維持行為一致性
                 try
                 {
-                    var global = SanitizeHeaderForMatch(s);
+                    var global = SanitizeHeaderForMatch(s ?? string.Empty);
                     if (!string.IsNullOrEmpty(global)) return global;
                 }
                 catch { }
 
                 // fallback: 保留原本 local 行為（包含 CJK 範圍），以避免因集中函式尚未覆蓋某些語系行為而破壞邏輯
-                s = s.Replace('\u0020', ' ').Replace('\u3000', ' ').Trim();
+                s = (s ?? string.Empty).Replace('\u0020', ' ').Replace('\u3000', ' ').Trim();
                 var sb = new System.Text.StringBuilder(s.Length);
                 foreach (var ch in s)
                 {
@@ -5292,6 +6398,33 @@ namespace Automatic_Storage
                 }
 
                 // fallback: original in-place implementation (kept for safety)
+                // If we have a cached DataTable we can build a lightweight index on a background thread
+                if (_currentUiTable != null)
+                {
+                    try
+                    {
+                        var dtSnapshot = _currentUiTable.Copy();
+                        _ = Task.Run(() =>
+                        {
+                            try
+                            {
+                                var sw = Stopwatch.StartNew();
+                                var svc2 = new Automatic_Storage.Services.MaterialIndexService(null);
+                                svc2.BuildIndexFromDataTable(dtSnapshot);
+                                sw.Stop();
+                                try { _ = Task.Run(() => Automatic_Storage.Utilities.Logger.LogInfoAsync($"Background BuildIndexFromDataTable finished: elapsed={sw.ElapsedMilliseconds}ms, indexCount={svc2.MaterialShippedSums?.Count ?? 0}")); } catch { }
+                                SafeBeginInvoke(this, new Action(() =>
+                                {
+                                    try { _materialShippedSums.Clear(); } catch { }
+                                    foreach (var kv in svc2.MaterialShippedSums) { try { _materialShippedSums[kv.Key] = kv.Value; } catch { } }
+                                    try { MarkShortagesInGrid(); } catch { }
+                                }));
+                            }
+                            catch { }
+                        });
+                    }
+                    catch { }
+                }
                 try
                 {
                     _materialIndex.Clear();
@@ -5309,7 +6442,7 @@ namespace Automatic_Storage
                             var val = raw?.ToString()?.Trim();
                             if (string.IsNullOrEmpty(val)) continue;
 
-                            var key = val;
+                            var key = val ?? string.Empty;
                             if (!_materialIndex.TryGetValue(key, out List<DataGridViewRow> list))
                             {
                                 list = new List<DataGridViewRow>(4);
@@ -5332,13 +6465,16 @@ namespace Automatic_Storage
                                     if (row == null || row.IsNewRow) continue;
                                     var rawMat = row.Cells[materialCol].Value?.ToString()?.Trim();
                                     if (string.IsNullOrEmpty(rawMat)) continue;
-                                    var key = NormalizeMaterialKey(rawMat);
+                                    var key = NormalizeMaterialKey(rawMat ?? string.Empty);
                                     if (string.IsNullOrEmpty(key)) continue;
                                     decimal v = 0m;
                                     var sv = row.Cells.Count > shippedCol ? row.Cells[shippedCol].Value?.ToString() ?? string.Empty : string.Empty;
                                     if (TryParseDecimalValue(sv, out decimal parsed)) v = parsed;
-                                    if (_materialShippedSums.TryGetValue(key, out decimal exist)) _materialShippedSums[key] = exist + v;
-                                    else _materialShippedSums[key] = v;
+                                    if (!string.IsNullOrEmpty(key))
+                                    {
+                                        if (_materialShippedSums.TryGetValue(key, out decimal exist)) _materialShippedSums[key] = exist + v;
+                                        else _materialShippedSums[key] = v;
+                                    }
                                 }
                                 catch { }
                             }
@@ -5421,6 +6557,7 @@ namespace Automatic_Storage
                 }
             }
             catch { }
+
         }
 
         /// <summary>
@@ -5449,7 +6586,7 @@ namespace Automatic_Storage
             {
                 SafeBeginInvoke(this, new Action(() =>
                 {
-                    try { if (this.txt備料單料號 != null && !this.txt備料單料號.IsDisposed) { this.txt備料單料號.Focus(); this.txt備料單料號.SelectAll(); } } catch { }
+                    try { if (this.txt備料單料號 != null && !this.txt備料單料號.IsDisposed) { try { _suppressNextTxt料號EnterPrompt = true; } catch { } this.txt備料單料號.Focus(); this.txt備料單料號.SelectAll(); } } catch { }
                 }));
             }
             catch { }
@@ -5480,9 +6617,16 @@ namespace Automatic_Storage
                     {
                         try { this.dgv備料單.DataSource = _currentUiTable; this.dgv備料單.Refresh(); } catch { }
                         try { HideColumnsByHeaders(this.dgv備料單); } catch { }
-                        try { BuildMaterialIndex(); } catch { }
+                        try
+                        {
+                            var swIndex = Stopwatch.StartNew();
+                            BuildMaterialIndex();
+                            swIndex.Stop();
+                            try { _ = Task.Run(() => Automatic_Storage.Utilities.Logger.LogInfoAsync($"BuildMaterialIndex: elapsed={swIndex.ElapsedMilliseconds}ms, indexCount={_materialIndex?.Count ?? 0}")); } catch { }
+                        }
+                        catch { }
                     }
-                    try { SafeBeginInvoke(this, () => { try { if (this.txt備料單料號 != null && !this.txt備料單料號.IsDisposed) { this.txt備料單料號.Focus(); this.txt備料單料號.SelectAll(); } } catch { } }); } catch { }
+                    try { SafeBeginInvoke(this, () => { try { if (this.txt備料單料號 != null && !this.txt備料單料號.IsDisposed) { try { _suppressNextTxt料號EnterPrompt = true; } catch { } this.txt備料單料號.Focus(); this.txt備料單料號.SelectAll(); } } catch { } }); } catch { }
                 }
             }
             catch { }
@@ -5543,8 +6687,68 @@ namespace Automatic_Storage
                 }
                 catch { }
                 try { AdjustFormSizeToDataGrid(); } catch { }
+                // 二階段保險調整：再啟動一個短暫的一次性 Timer，在系統佈局穩定後再執行一次 autosize
+                try
+                {
+                    var oneShot = new System.Windows.Forms.Timer() { Interval = 120 };
+                    oneShot.Tick += (s2, e2) =>
+                    {
+                        try
+                        {
+                            oneShot.Stop();
+                            try { oneShot.Dispose(); } catch { }
+                            AutoSizeColumnsFillNoHorizontalScroll(this.dgv備料單);
+                            try { this.dgv備料單?.Invalidate(); this.dgv備料單?.Refresh(); } catch { }
+                        }
+                        catch { }
+                    };
+                    try { oneShot.Start(); } catch { try { oneShot.Dispose(); } catch { } }
+                }
+                catch { }
             }
             catch { }
+        }
+
+        /// <summary>
+        /// Background append of DataTable rows to a visible table bound to DataGridView.
+        /// Appends rows in chunks and uses SafeBeginInvoke to perform UI updates on UI thread.
+        /// </summary>
+        private async Task AppendRemainingRowsToGrid(DataTable fullTable, DataTable visibleTable, int startIndex, CancellationToken token)
+        {
+            if (fullTable == null || visibleTable == null) return;
+            try
+            {
+                var sw = Stopwatch.StartNew();
+                int total = fullTable.Rows.Count;
+                int idx = startIndex;
+                while (idx < total)
+                {
+                    if (token.IsCancellationRequested) break;
+                    int chunk = Math.Min(UI_CHUNK_SIZE, total - idx);
+                    var rowsToAppend = new List<DataRow>(chunk);
+                    for (int j = 0; j < chunk; j++) rowsToAppend.Add(fullTable.Rows[idx + j]);
+                    // perform UI append on UI thread
+                    SafeBeginInvoke(this, new Action(() =>
+                    {
+                        try
+                        {
+                            foreach (var r in rowsToAppend)
+                            {
+                                try { visibleTable.ImportRow(r); } catch { }
+                            }
+                        }
+                        catch { }
+                    }));
+                    idx += chunk;
+                    try { await Task.Delay(100).ConfigureAwait(false); } catch { }
+                }
+                sw.Stop();
+                try { _ = Task.Run(() => Automatic_Storage.Utilities.Logger.LogInfoAsync($"AppendRemainingRowsToGrid complete: elapsed={sw.ElapsedMilliseconds}ms, totalRows={total}")); } catch { }
+            }
+            catch (Exception ex)
+            {
+                try { _ = Task.Run(() => Automatic_Storage.Utilities.Logger.LogErrorAsync($"AppendRemainingRowsToGrid failed: {ex.Message}")); } catch { }
+            }
         }
 
         // Form Resize handler - 啟動去抖
@@ -5645,6 +6849,100 @@ namespace Automatic_Storage
         }
 
         /// <summary>
+        /// 當使用者在 DataGridView 雙擊時，如果是「備註」欄則開始編輯。
+        /// 以具名處理器方式綁定，可避免重複匿名處理器造成多重綁定問題。
+        /// </summary>
+        private void Dgv備料單_CellDoubleClick_StartEdit(object? sender, DataGridViewCellEventArgs e)
+        {
+            try
+            {
+                if (sender is DataGridView dgv)
+                {
+                    if (e.RowIndex >= 0 && e.ColumnIndex >= 0)
+                    {
+                        int remarkCol = FindColumnIndexByNames(new[] { "備註", "備註欄", "Remark" });
+                        if (remarkCol >= 0 && e.ColumnIndex == remarkCol)
+                        {
+                            try
+                            {
+                                // 暫時解除 DataGridView 欄位與底層 DataTable.DataColumn 的 ReadOnly，
+                                // 並記錄原本狀態以便在 CellEndEdit 時還原。
+                                try
+                                {
+                                    if (dgv.Columns != null && remarkCol < dgv.Columns.Count)
+                                    {
+                                        if (!_tempColumnOrigReadOnly.ContainsKey(remarkCol))
+                                        {
+                                            try { _tempColumnOrigReadOnly[remarkCol] = dgv.Columns[remarkCol].ReadOnly; } catch { }
+                                        }
+                                        try { dgv.Columns[remarkCol].ReadOnly = false; } catch { }
+
+                                        var col = dgv.Columns[remarkCol];
+                                        var propName = col != null ? (!string.IsNullOrEmpty(col.DataPropertyName) ? col.DataPropertyName : col.Name) : null;
+                                        if (!string.IsNullOrEmpty(propName) && dgv.DataSource is DataTable dt && dt.Columns.Contains(propName))
+                                        {
+                                            if (!_tempDataColumnOrigReadOnly.ContainsKey(propName!))
+                                            {
+                                                try { _tempDataColumnOrigReadOnly[propName!] = dt.Columns[propName!].ReadOnly; } catch { }
+                                            }
+                                            try { dt.Columns[propName!].ReadOnly = false; } catch { }
+                                        }
+                                    }
+                                }
+                                catch { }
+
+                                // 標記此儲存格為正在臨時編輯，以便在結束時還原
+                                string tmpKey = e.RowIndex + "_" + e.ColumnIndex;
+                                try { _remarkTempEditingCells.Add(tmpKey); } catch { }
+
+                                // 暫時解除整個 DataGridView 的 ReadOnly（若有設定），並記錄原本狀態以便還原
+                                try
+                                {
+                                    if (_tempGridOrigReadOnly == null)
+                                    {
+                                        try { _tempGridOrigReadOnly = dgv.ReadOnly; } catch { _tempGridOrigReadOnly = null; }
+                                    }
+                                    try { dgv.ReadOnly = false; } catch { }
+                                }
+                                catch { }
+
+                                // 顯示可編輯提示顏色（使用較明顯的黃色）
+                                try
+                                {
+                                    var cell = dgv.Rows[e.RowIndex].Cells[e.ColumnIndex];
+                                    if (cell != null)
+                                    {
+                                        try
+                                        {
+                                            // 儲存原始背景色以便在結束編輯時還原
+                                            try
+                                            {
+                                                var orig = cell.Style.BackColor;
+                                                // 若沒有為 cell.Style 指定背景，避免使用 InheritedStyle（主題/選取色可能為黑色），
+                                                // 改以預設視窗背景色為還原預設值。
+                                                if (orig.IsEmpty) orig = SystemColors.Window;
+                                                try { _tempCellOrigBackColors[tmpKey] = orig; } catch { }
+                                            }
+                                            catch { }
+                                            try { cell.Style.BackColor = Color.Yellow; } catch { }
+                                        }
+                                        catch { }
+                                    }
+                                }
+                                catch { }
+
+                                dgv.CurrentCell = dgv.Rows[e.RowIndex].Cells[e.ColumnIndex];
+                                dgv.BeginEdit(true);
+                            }
+                            catch { }
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>
         /// DataGridView 捲動事件處理器。
         /// 當 DataGridView 捲動時，自動隱藏目前顯示的 ToolTip，避免內容殘留。
         /// </summary>
@@ -5719,6 +7017,139 @@ namespace Automatic_Storage
             catch { }
         }
 
+        // 處理顯示器或 DPI 變更，確保在切換螢幕/縮放後能正確重新計算欄寬
+        private const int WM_DPICHANGED = 0x02E0;
+        private const int WM_DISPLAYCHANGE = 0x007E;
+
+        /// <summary>
+        /// 覆寫 WndProc 以偵測 DPI / 顯示變更，並以安全方式觸發去抖調整或直接重新計算欄寬。
+        /// 此實作會在處理完系統訊息後再排程 UI 工作，避免在還未完成系統佈局時就執行欄寬計算。
+        /// </summary>
+        /// <param name="m">訊息參數。</param>
+        protected override void WndProc(ref Message m)
+        {
+            try
+            {
+                base.WndProc(ref m);
+
+                if (m.Msg == WM_DPICHANGED || m.Msg == WM_DISPLAYCHANGE)
+                {
+                    try
+                    {
+                        // 使用 SafeBeginInvoke 保證在 UI 執行緒執行，並給系統一個機會完成佈局改變
+                        SafeBeginInvoke(this, () =>
+                        {
+                            try
+                            {
+                                if (_resizeTimer != null)
+                                {
+                                    // restart debounce timer so ResizeTimer_Tick 處理最終調整
+                                    _resizeTimer.Stop();
+                                    _resizeTimer.Start();
+                                }
+                                else
+                                {
+                                    // fallback: 直接執行 autosize
+                                    AutoSizeColumnsFillNoHorizontalScroll(this.dgv備料單);
+                                    try { this.dgv備料單?.Invalidate(); this.dgv備料單?.Refresh(); } catch { }
+                                }
+                            }
+                            catch { }
+                        });
+                    }
+                    catch { }
+                }
+            }
+            catch
+            {
+                // 即使 WndProc 發生例外，也不要讓整個應用崩潰
+                try { base.WndProc(ref m); } catch { }
+            }
+        }
+
+        /// <summary>
+        /// 偵測表單所在顯示器變更（例如拖到另一個螢幕），並在必要時調整表單大小/狀態。
+        /// 行為：
+        /// - 如果表單原先為最大化，則在切換至新螢幕後重新最大化（以該螢幕為基準）。
+        /// - 否則，嘗試將表單大小限制在新螢幕的工作區內，並在需要時觸發欄寬自動調整。
+        /// </summary>
+        private void Form_LocationChanged(object? sender, EventArgs e)
+        {
+            try
+            {
+                // 取得目前表單所在的螢幕
+                Screen sc;
+                try { sc = Screen.FromControl(this); } catch { sc = Screen.PrimaryScreen; }
+                if (sc == null) return;
+
+                var dev = sc.DeviceName;
+                // 若沒有變更顯示器則不處理
+                if (string.Equals(dev, _lastScreenDeviceName, StringComparison.OrdinalIgnoreCase)) return;
+
+                // 更新追蹤資訊
+                var prevScreenDevice = _lastScreenDeviceName;
+                var prevWorkingArea = _lastScreenWorkingArea;
+                _lastScreenDeviceName = dev;
+                _lastScreenWorkingArea = sc.WorkingArea;
+
+                // 若原先為最大化，則在新螢幕上也最大化
+                bool wasMax = false;
+                try { wasMax = this.WindowState == FormWindowState.Maximized; } catch { }
+
+                SafeBeginInvoke(this, () =>
+                {
+                    try
+                    {
+                        if (wasMax)
+                        {
+                            try
+                            {
+                                // 先還原再於新螢幕上最大化，避免舊螢幕的 WindowPlacement 干擾
+                                this.WindowState = FormWindowState.Normal;
+                                this.SetBounds(sc.WorkingArea.Left, sc.WorkingArea.Top, sc.WorkingArea.Width, sc.WorkingArea.Height);
+                                this.WindowState = FormWindowState.Maximized;
+                            }
+                            catch { }
+                        }
+                        else
+                        {
+                            try
+                            {
+                                // 若表單目前超出新的工作區或太小，調整使其適配新螢幕
+                                var wa = sc.WorkingArea;
+                                int newLeft = this.Left;
+                                int newTop = this.Top;
+                                int newW = this.Width;
+                                int newH = this.Height;
+
+                                // 若表單右側超出新工作區，調整 Left
+                                if (newLeft + newW > wa.Right) newLeft = Math.Max(wa.Left, wa.Right - newW);
+                                if (newTop + newH > wa.Bottom) newTop = Math.Max(wa.Top, wa.Bottom - newH);
+
+                                // 如果表單寬度小於工作區，且內容看起來可以放大，嘗試放寬到較大寬度
+                                if (newW < wa.Width && newW < prevWorkingArea.Width)
+                                {
+                                    // 將寬度伸展到較大者（但不超過工作區）
+                                    newW = Math.Min(wa.Width, Math.Max(newW, Math.Min(prevWorkingArea.Width, wa.Width)));
+                                }
+
+                                // 應用調整
+                                this.SuspendLayout();
+                                try { this.SetBounds(newLeft, newTop, newW, newH); }
+                                catch { }
+                                finally { try { this.ResumeLayout(); } catch { } }
+                                // 重新計算欄寬
+                                if (_resizeTimer != null) { _resizeTimer.Stop(); _resizeTimer.Start(); } else { try { AutoSizeColumnsFillNoHorizontalScroll(this.dgv備料單); } catch { } }
+                            }
+                            catch { }
+                        }
+                    }
+                    catch { }
+                });
+            }
+            catch { }
+        }
+
         /// <summary>
         /// 將 _preservedRedKeys 中標記為短缺的料號，於 DataGridView 中對應的「實發數量」或「發料數量」欄位恢復紅色高亮。
         /// 此方法會根據「昶亨料號」與「客戶料號」欄位比對，僅針對已標記的料號進行顏色還原。
@@ -5776,7 +7207,7 @@ namespace Automatic_Storage
         {
             // 回傳 mapping 的鍵值為我們統一使用的 internal name
             mapping = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-            errMsg = null;
+            errMsg = string.Empty;
             if (dt == null) { errMsg = "資料表為空。"; return false; }
 
             // 欄位候選群組（越前面的名稱優先）
@@ -5833,13 +7264,13 @@ namespace Automatic_Storage
 
                 // 4) fuzzy by removing non-alphanumeric characters and comparing
                 // Reuse central normalizer to keep behavior consistent
-                var normalizedCandidates = names.Select(x => SanitizeHeaderForMatch(x)).Where(x => !string.IsNullOrEmpty(x)).ToArray();
+                var normalizedCandidates = names.Select(x => SanitizeHeaderForMatch(x ?? string.Empty)).Where(x => !string.IsNullOrEmpty(x)).ToArray();
                 foreach (var ck in colNameMap.Keys)
                 {
-                    var nk = SanitizeHeaderForMatch(ck);
+                    var nk = SanitizeHeaderForMatch(ck ?? string.Empty);
                     // 修正：當中文欄名去除非英數字會變成空字串時，先略過，避免任何 candidate 都被誤判符合
                     if (string.IsNullOrEmpty(nk)) continue;
-                    if (normalizedCandidates.Any(cn => !string.IsNullOrEmpty(cn) && (nk.Contains(cn) || cn.Contains(nk)))) return colNameMap[ck];
+                    if (normalizedCandidates.Any(cn => !string.IsNullOrEmpty(cn) && (nk.Contains(cn) || cn.Contains(nk)))) return colNameMap[ck!];
                 }
 
                 return -1;
@@ -5951,8 +7382,8 @@ namespace Automatic_Storage
         /// <returns>成功寫入則回傳 true，否則 false。</returns>
         private bool WriteBackShippedQuantitiesToExcelBatch(string excelPath, DataTable dt, Dictionary<string, int> columnMapping, string excelPassword, out string errMsg)
         {
-            errMsg = null;
 
+            errMsg = string.Empty;
             if (string.IsNullOrWhiteSpace(excelPath) || !File.Exists(excelPath)) { errMsg = "Excel 檔案不存在。"; return false; }
 
             try
@@ -5964,9 +7395,10 @@ namespace Automatic_Storage
                 // debug file path declarations removed
                 var result = RunInSta(() =>
                 {
-                    string localErr = null;
-                    Excel.Application xlApp = null;
-                    Excel.Workbook wb = null;
+                    string? localErr = null;
+                    var localWarnings = new System.Collections.Generic.List<string>();
+                    Excel.Application? xlApp = null;
+                    Excel.Workbook? wb = null;
                     Excel.Range? used = null;
                     // 用於暫存原本的 Application 設定，操作完畢會還原
                     bool? prevScreenUpdating = null;
@@ -5984,8 +7416,8 @@ namespace Automatic_Storage
                         try { prevDisplayAlerts = xlApp.DisplayAlerts; xlApp.DisplayAlerts = false; } catch { }
                         try { prevCalculation = xlApp.Calculation; xlApp.Calculation = Excel.XlCalculation.xlCalculationManual; } catch { }
 
-                        Excel.Worksheet sheet = null;
-                        try { sheet = wb.Worksheets["總表"] as Excel.Worksheet; if (sheet == null) sheet = wb.Worksheets[1] as Excel.Worksheet; } catch { sheet = wb.Worksheets[1] as Excel.Worksheet; }
+                        Excel.Worksheet? sheet = null;
+                        try { sheet = wb.Worksheets["總表"] as Excel.Worksheet; if (sheet == null) sheet = wb.Worksheets[1] as Excel.Worksheet; } catch { try { sheet = wb.Worksheets[1] as Excel.Worksheet; } catch { sheet = null; } }
                         if (sheet == null) { localErr = "找不到總表工作表。"; return (false, localErr); }
 
                         // 嘗試解除保護
@@ -6007,24 +7439,29 @@ namespace Automatic_Storage
 
                         // 在前幾列（由 UsedRange 的起始列開始）掃描標頭，找出「昶亨料號」/「客戶料號」與「實發/發料」所在欄位（絕對座標）
                         int headerRowAbs = -1;
-                        int materialColAbs = -1, shippedColAbs = -1;
+                        int materialColAbs = -1, shippedColAbs = -1, remarkColAbs = -1;
                         string[] materialTokens = new[] { "昶亨料號", "客戶料號" };
-                        // 僅接受與「實發/發料」相關的欄名；明確排除「需求/應領」等欄，避免誤判
+                        // shipped tokens
                         string[] shippedTokens = new[] { "實發數量", "發料數量" };
                         string[] shippedExclude = new[] { "需求數量", "應領數量" };
+                        // remark tokens (optional)
+                        string[] remarkTokens = new[] { "備註", "備註欄", "Remark" };
+
+                        // 預先計算已正規化的 token，以避免在每個 cell 反覆呼叫 SanitizeHeaderForMatch
+                        var sanitizedMaterialTokens = materialTokens.Select(t => SanitizeHeaderForMatch(t ?? string.Empty)).ToArray();
+                        var sanitizedShippedTokens = shippedTokens.Select(t => SanitizeHeaderForMatch(t ?? string.Empty)).ToArray();
+                        var sanitizedShippedExclude = shippedExclude.Select(t => SanitizeHeaderForMatch(t ?? string.Empty)).ToArray();
+                        var sanitizedRemarkTokens = remarkTokens.Select(t => SanitizeHeaderForMatch(t ?? string.Empty)).ToArray();
 
                         int maxScanHeaderRows = Math.Min(10, used.Rows.Count);
-                        // diagnostic log builder for header scanning
-                        var __scanLog = new System.Text.StringBuilder();
-                        __scanLog.AppendLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] ExcelPath: {excelPath}");
-                        __scanLog.AppendLine($"Scanning header rows: firstRow={firstRow}, lastRow={lastRow}, maxScanHeaderRows={maxScanHeaderRows}");
+                        // header scan diagnostic removed (previously used for local debug files)
 
                         // Use central helper to normalize header text (移除非英數字並小寫)
                         // Reuse existing SanitizeHeaderForMatch to keep normalization consistent across the form
 
-                        for (int r = firstRow; r <= Math.Min(firstRow + maxScanHeaderRows - 1, lastRow) && (materialColAbs < 0 || shippedColAbs < 0); r++)
+                        for (int r = firstRow; r <= Math.Min(firstRow + maxScanHeaderRows - 1, lastRow) && (materialColAbs < 0 || shippedColAbs < 0 || remarkColAbs < 0); r++)
                         {
-                            int tmpMatAbs = -1, tmpShipAbs = -1;
+                            int tmpMatAbs = -1, tmpShipAbs = -1, tmpRemarkAbs = -1;
                             for (int c = firstCol; c <= lastCol; c++)
                             {
                                 var hv = (sheet.Cells[r, c] as Excel.Range)?.Value2;
@@ -6032,20 +7469,19 @@ namespace Automatic_Storage
                                 var hs = hv?.ToString()?.Trim() ?? string.Empty;
                                 // log each header cell evaluated (original and normalized)
                                 string nh = SanitizeHeaderForMatch(hs);
-                                try { __scanLog.AppendLine($"Row {r} Col {c}: raw='{hs}' norm='{nh}'"); } catch { }
+                                // header cell diagnostic suppressed
 
                                 // material detection: prefer normalized contains match
-                                if (tmpMatAbs < 0 && materialTokens.Any(t => nh.IndexOf(SanitizeHeaderForMatch(t), StringComparison.OrdinalIgnoreCase) >= 0)) tmpMatAbs = c;
+                                if (tmpMatAbs < 0 && sanitizedMaterialTokens.Any(nt => nh.IndexOf(nt, StringComparison.OrdinalIgnoreCase) >= 0)) tmpMatAbs = c;
 
                                 if (tmpShipAbs < 0)
                                 {
                                     // 改良判別：優先接受明確含「數/量/Qty」字眼的標頭，避免像「發料倉」被誤判為發料數量欄
                                     bool foundPos = false;
-                                    foreach (var t in shippedTokens)
+                                    foreach (var nt in sanitizedShippedTokens)
                                     {
                                         try
                                         {
-                                            var nt = SanitizeHeaderForMatch(t);
                                             if (nh.IndexOf(nt, StringComparison.OrdinalIgnoreCase) >= 0)
                                             {
                                                 // 對於過短或過通用的 token（例如「發料」「實發」），要求標頭同時包含數量字眼
@@ -6064,26 +7500,25 @@ namespace Automatic_Storage
                                         catch { }
                                     }
                                     // record why we matched or not for shipped candidates
-                                    try
-                                    {
-                                        if (foundPos) __scanLog.AppendLine($"  -> shipped token matched candidate at Col {c}: raw='{hs}' norm='{nh}'");
-                                        else __scanLog.AppendLine($"  -> shipped token NOT matched at Col {c}: raw='{hs}' norm='{nh}'");
-                                    }
-                                    catch { }
+                                    // shipped token match diagnostic suppressed
                                     bool hasPos = foundPos;
-                                    bool hasNeg = shippedExclude.Any(t => nh.IndexOf(SanitizeHeaderForMatch(t), StringComparison.OrdinalIgnoreCase) >= 0);
+                                    bool hasNeg = sanitizedShippedExclude.Any(nt => nh.IndexOf(nt, StringComparison.OrdinalIgnoreCase) >= 0);
                                     if (hasPos && !hasNeg) tmpShipAbs = c;
                                 }
-                                if (tmpMatAbs >= 0 && tmpShipAbs >= 0) break;
+                                // remark detection (optional)
+                                if (tmpRemarkAbs < 0 && sanitizedRemarkTokens.Any(nt => nh.IndexOf(nt, StringComparison.OrdinalIgnoreCase) >= 0)) tmpRemarkAbs = c;
+
+                                if (tmpMatAbs >= 0 && tmpShipAbs >= 0 && tmpRemarkAbs >= 0) break;
                             }
                             if (tmpMatAbs >= 0 && tmpShipAbs >= 0)
                             {
-                                headerRowAbs = r; materialColAbs = tmpMatAbs; shippedColAbs = tmpShipAbs; break;
+                                headerRowAbs = r; materialColAbs = tmpMatAbs; shippedColAbs = tmpShipAbs; if (tmpRemarkAbs >= 0) remarkColAbs = tmpRemarkAbs; break;
                             }
                             if (headerRowAbs < 0)
                             {
                                 if (tmpMatAbs >= 0) { headerRowAbs = r; materialColAbs = tmpMatAbs; }
                                 if (tmpShipAbs >= 0) { headerRowAbs = r; shippedColAbs = tmpShipAbs; }
+                                if (tmpRemarkAbs >= 0) { headerRowAbs = r; remarkColAbs = tmpRemarkAbs; }
                             }
                         }
 
@@ -6097,16 +7532,16 @@ namespace Automatic_Storage
                         }
 
                         // 建立：料號文字 -> 絕對資料列索引 的映射
-                        var sheetMap = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                        var sheetMap = new Dictionary<string, List<int>>(StringComparer.OrdinalIgnoreCase);
                         // 為了減少 COM 呼叫次數，一次性讀取料號欄與發料欄到本機陣列，然後在記憶體中處理
                         int firstDataRowAbs = headerRowAbs + 1;
                         int lastDataRowAbs = lastRow;
                         int dataCount = Math.Max(0, lastDataRowAbs - firstDataRowAbs + 1);
 
-                        object[,] materialVals = null;
-                        object[,] shippedVals = null;
-                        Excel.Range matRange = null;
-                        Excel.Range shipRange = null;
+                        object[,]? materialVals = null;
+                        object[,]? shippedVals = null;
+                        Excel.Range? matRange = null;
+                        Excel.Range? shipRange = null;
                         try
                         {
                             if (dataCount > 0)
@@ -6151,7 +7586,9 @@ namespace Automatic_Storage
                                         if (mv == null) continue;
                                         var key = mv?.ToString()?.Trim() ?? string.Empty; if (string.IsNullOrEmpty(key)) continue;
                                         int sheetRow = firstDataRowAbs + idx;
-                                        if (!sheetMap.ContainsKey(key)) sheetMap[key] = sheetRow;
+                                        if (!sheetMap.ContainsKey(key)) sheetMap[key] = new List<int>();
+                                        // 記錄同料號所有絕對列索引
+                                        sheetMap[key].Add(sheetRow);
                                     }
                                     catch { }
                                 }
@@ -6164,7 +7601,8 @@ namespace Automatic_Storage
                                     var mv = (sheet.Cells[r, materialColAbs] as Excel.Range)?.Value2;
                                     if (mv == null) continue;
                                     var key = mv?.ToString()?.Trim() ?? string.Empty; if (string.IsNullOrEmpty(key)) continue;
-                                    if (!sheetMap.ContainsKey(key)) sheetMap[key] = r;
+                                    if (!sheetMap.ContainsKey(key)) sheetMap[key] = new List<int>();
+                                    sheetMap[key].Add(r);
                                 }
                             }
                         }
@@ -6174,35 +7612,82 @@ namespace Automatic_Storage
                             try { if (shipRange != null) ReleaseComObjectSafe(shipRange); } catch { }
                         }
 
-                        int dtMaterialIdx = columnMapping.ContainsKey("Material") ? columnMapping["Material"] : -1;
-                        int dtShippedIdx = columnMapping.ContainsKey("Shipped") ? columnMapping["Shipped"] : -1;
-                        if (dtMaterialIdx < 0 || dtShippedIdx < 0) { localErr = "內部欄位對應遺失 (Material/Shipped)。"; return (false, localErr); }
-
-                        var writeUpdates = new Dictionary<int, object>(); // rowAbs -> new value
-                        var previousValues = new Dictionary<int, double>(); // rowAbs -> old value (for 記錄 用)
+                        // 依副檔名決定數量欄位名稱
+                        string ext = Path.GetExtension(excelPath).ToLowerInvariant();
+                        string qtyColName = ext == ".xlsm" ? "實發數量" : "發料數量";
+                        string[] dtMaterialCols = new[] { "昶亨料號", "客戶料號" };
+                        int dtRemarkIdx = columnMapping.ContainsKey("Remark") ? columnMapping["Remark"] : -1;
+                        // 建立 DataTable 料號索引（任一欄符合即可）
+                        var dtRowMaterialKeys = new Dictionary<int, List<string>>();
                         for (int i = 0; i < dt.Rows.Count; i++)
                         {
-                            var matObj = dt.Rows[i][dtMaterialIdx]; if (matObj == null) continue;
-                            var mat = matObj?.ToString()?.Trim() ?? string.Empty; if (string.IsNullOrEmpty(mat)) continue;
-                            if (!sheetMap.TryGetValue(mat, out int targetRowAbs)) continue;
-                            var dtValObj = dt.Rows[i][dtShippedIdx];
-                            // 若資料為 null 或空白，視為使用者清除此欄位，應回寫空字串以清空 Excel 儲存格（不可跳過）
+                            var keys = new List<string>();
+                            foreach (var col in dtMaterialCols)
+                            {
+                                if (dt.Columns.Contains(col))
+                                {
+                                    var v = dt.Rows[i][col]?.ToString()?.Trim();
+                                    if (!string.IsNullOrEmpty(v))
+                                    {
+                                        // 僅於 v 非 null 且非空字串時加入
+                                        keys.Add(v!);
+                                    }
+                                }
+                            }
+                            dtRowMaterialKeys[i] = keys;
+                        }
+                        var writeUpdates = new Dictionary<int, object>(); // rowAbs -> new value
+                        var previousValues = new Dictionary<int, double>(); // rowAbs -> old value (for 記錄 用)
+                        var remarkUpdates = new Dictionary<int, object>(); // rowAbs -> remark string
+                        for (int i = 0; i < dt.Rows.Count; i++)
+                        {
+                            // 依序嘗試所有料號欄位，支援同料號對應多筆 sheet 列
+                            int targetRowAbs = -1;
+                            foreach (var key in dtRowMaterialKeys[i])
+                            {
+                                if (sheetMap.TryGetValue(key, out var list))
+                                {
+                                    // 優先找尚未被 writeUpdates/remarkUpdates 佔用的列
+                                    foreach (var cand in list)
+                                    {
+                                        if (!writeUpdates.ContainsKey(cand) && !remarkUpdates.ContainsKey(cand))
+                                        {
+                                            targetRowAbs = cand;
+                                            break;
+                                        }
+                                    }
+                                    // 若找不到未被佔用的，回退選擇第一筆
+                                    if (targetRowAbs < 0 && list.Count > 0) targetRowAbs = list[0];
+                                    break;
+                                }
+                            }
+                            if (targetRowAbs < 0) continue;
+                            // 數量欄位
+                            object? dtValObj = dt.Columns.Contains(qtyColName) ? dt.Rows[i][qtyColName] : null;
+                            // 備註
+                            try
+                            {
+                                if (dtRemarkIdx >= 0 && remarkColAbs > 0 && dt.Columns.Contains("備註"))
+                                {
+                                    var remarkObj = dt.Rows[i]["備註"];
+                                    var remarkStr = remarkObj?.ToString() ?? string.Empty;
+                                    remarkUpdates[targetRowAbs] = SanitizeRemarkForExcel(remarkStr);
+                                }
+                            }
+                            catch { }
+                            // 若資料為 null 或空白，視為清除
                             if (dtValObj == null)
                             {
                                 writeUpdates[targetRowAbs] = string.Empty;
                                 continue;
                             }
-
-                            // 盡量寬鬆解析數值；若為空白字串則視為清空儲存格
                             double newVal;
                             var sVal = dtValObj?.ToString() ?? string.Empty;
                             if (string.IsNullOrWhiteSpace(sVal))
                             {
-                                // 使用者把值清空，回寫空字串以清除 Excel 儲存格內容
                                 writeUpdates[targetRowAbs] = string.Empty;
                                 continue;
                             }
-
                             if (!double.TryParse(sVal, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.CurrentCulture, out newVal))
                             {
                                 if (!double.TryParse(sVal, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out newVal))
@@ -6210,14 +7695,13 @@ namespace Automatic_Storage
                                     if (TryParseDecimalFlexible(sVal, out var dec)) newVal = (double)dec; else continue;
                                 }
                             }
-                            // 先擷取舊值（若能取到） - 優先從一次性讀取的 shippedVals 中取得，避免逐格 COM 呼叫
                             try
                             {
                                 if (shippedVals != null)
                                 {
                                     int rb = shippedVals.GetLowerBound(0);
                                     int cb = shippedVals.GetLowerBound(1);
-                                    int idx = targetRowAbs - firstDataRowAbs; // zero-based
+                                    int idx = targetRowAbs - firstDataRowAbs;
                                     if (idx >= 0 && (rb + idx) <= shippedVals.GetUpperBound(0))
                                     {
                                         var oldObj = shippedVals[rb + idx, cb];
@@ -6235,7 +7719,6 @@ namespace Automatic_Storage
                                 }
                             }
                             catch { previousValues[targetRowAbs] = 0d; }
-
                             writeUpdates[targetRowAbs] = newVal;
                         }
 
@@ -6262,16 +7745,24 @@ namespace Automatic_Storage
                                     if (windowCount <= 0) return;
 
                                     // 讀取現有值的區間以便保留沒有變更的儲存格
-                                    object[,] existingVals = null;
+                                    object[,]? existingVals = null;
                                     try
                                     {
-                                        var existingRange = sheet.Range[sheet.Cells[startRowAbs, shippedColAbs], sheet.Cells[endRowAbs, shippedColAbs]] as Excel.Range;
-                                        var existRaw = existingRange?.Value2;
-                                        if (existRaw is object[,]) existingVals = (object[,])existRaw;
-                                        else if (existRaw != null)
+                                        Excel.Range? existingRange = null;
+                                        try
                                         {
-                                            existingVals = new object[1, 1];
-                                            existingVals[0, 0] = existRaw;
+                                            existingRange = sheet.Range[sheet.Cells[startRowAbs, shippedColAbs], sheet.Cells[endRowAbs, shippedColAbs]] as Excel.Range;
+                                            var existRaw = existingRange?.Value2;
+                                            if (existRaw is object[,]) existingVals = (object[,])existRaw;
+                                            else if (existRaw != null)
+                                            {
+                                                existingVals = new object[1, 1];
+                                                existingVals[0, 0] = existRaw;
+                                            }
+                                        }
+                                        finally
+                                        {
+                                            try { if (existingRange != null) ReleaseComObjectSafe(existingRange); } catch { }
                                         }
                                     }
                                     catch { existingVals = null; }
@@ -6303,19 +7794,81 @@ namespace Automatic_Storage
 
                                     try
                                     {
-                                        var startCell = sheet.Cells[startRowAbs, shippedColAbs];
-                                        var endCell = sheet.Cells[endRowAbs, shippedColAbs];
-                                        var range = sheet.Range[startCell, endCell];
-                                        range.Value2 = buffer;
+                                        Excel.Range? startCell = null;
+                                        Excel.Range? endCell = null;
+                                        Excel.Range? range = null;
+                                        try
+                                        {
+                                            startCell = sheet.Cells[startRowAbs, shippedColAbs] as Excel.Range;
+                                            endCell = sheet.Cells[endRowAbs, shippedColAbs] as Excel.Range;
+                                            range = (startCell != null && endCell != null) ? sheet.Range[startCell, endCell] as Excel.Range : null;
+                                            if (range != null)
+                                            {
+                                                range.Value2 = buffer;
+                                                try
+                                                {
+                                                    // 確保儲存格為一般格式，避免原先為 Text 導致數字被當字串
+                                                    range.NumberFormat = "General";
+                                                }
+                                                catch { }
+
+                                                try
+                                                {
+                                                    // 只將常數型式的數字儲存格靠右對齊
+                                                    Excel.Range? nums = null;
+                                                    try { nums = range.SpecialCells(Excel.XlCellType.xlCellTypeConstants, Excel.XlSpecialCellsValue.xlNumbers) as Excel.Range; } catch { nums = null; }
+                                                    if (nums != null) try { nums.HorizontalAlignment = Excel.XlHAlign.xlHAlignRight; } catch { }
+
+                                                    // 也處理公式計算後為數字的儲存格
+                                                    Excel.Range? numsForm = null;
+                                                    try { numsForm = range.SpecialCells(Excel.XlCellType.xlCellTypeFormulas, Excel.XlSpecialCellsValue.xlNumbers) as Excel.Range; } catch { numsForm = null; }
+                                                    if (numsForm != null) try { numsForm.HorizontalAlignment = Excel.XlHAlign.xlHAlignRight; } catch { }
+                                                }
+                                                catch { }
+                                            }
+                                        }
+                                        finally
+                                        {
+                                            try { if (range != null) ReleaseComObjectSafe(range); } catch { }
+                                            try { if (startCell != null) ReleaseComObjectSafe(startCell); } catch { }
+                                            try { if (endCell != null) ReleaseComObjectSafe(endCell); } catch { }
+                                        }
                                     }
-                                    catch
+                                    catch (Exception ex)
                                     {
+                                        try { localWarnings.Add($"Batch write window [{startRowAbs}-{endRowAbs}] failed: {ex.Message}"); } catch { }
                                         // fallback to per-row write if batch fails
                                         for (int r = startRowAbs; r <= endRowAbs; r++)
                                         {
                                             try
                                             {
-                                                if (writeUpdates.TryGetValue(r, out object v)) (sheet.Cells[r, shippedColAbs] as Excel.Range).Value2 = v;
+                                                if (writeUpdates.TryGetValue(r, out object v))
+                                                {
+                                                    try
+                                                    {
+                                                        var cell = sheet.Cells[r, shippedColAbs] as Excel.Range;
+                                                        if (cell != null)
+                                                        {
+                                                            cell.Value2 = v;
+                                                            try { cell.NumberFormat = "General"; } catch { }
+                                                            try
+                                                            {
+                                                                // 若寫入的是數值型別或能轉為 double，則靠右
+                                                                if (v is double || v is float || v is int || v is long || (v is string sv && double.TryParse(sv, out _)))
+                                                                    cell.HorizontalAlignment = Excel.XlHAlign.xlHAlignRight;
+                                                            }
+                                                            catch { }
+                                                        }
+                                                        else
+                                                        {
+                                                            try { sheet.Cells[r, shippedColAbs] = v; } catch { }
+                                                        }
+                                                    }
+                                                    catch
+                                                    {
+                                                        try { sheet.Cells[r, shippedColAbs] = v; } catch { }
+                                                    }
+                                                }
                                             }
                                             catch { }
                                         }
@@ -6341,6 +7894,93 @@ namespace Automatic_Storage
                             writeWindow(segStart, segPrev);
                         }
 
+                        // 如果有備註欄位且有要回寫的備註，分批寫入備註欄（與發料欄分開）
+                        try
+                        {
+                            if (remarkColAbs > 0 && remarkUpdates != null && remarkUpdates.Count > 0)
+                            {
+                                var rrows = remarkUpdates.Keys.OrderBy(r => r).ToArray();
+                                int rsegStart = rrows[0];
+                                int rsegPrev = rrows[0];
+
+                                Action<int, int> writeRemarkWindow = (startRowAbs, endRowAbs) =>
+                                {
+                                    try
+                                    {
+                                        int windowCount = endRowAbs - startRowAbs + 1;
+                                        if (windowCount <= 0) return;
+                                        object[,] buffer = new object[windowCount, 1];
+                                        for (int ii = 0; ii < windowCount; ii++)
+                                        {
+                                            int sheetRow = startRowAbs + ii;
+                                            if (remarkUpdates.TryGetValue(sheetRow, out object v))
+                                            {
+                                                var s = v?.ToString() ?? string.Empty;
+                                                buffer[ii, 0] = string.IsNullOrEmpty(s) ? string.Empty : SanitizeRemarkForExcel(s);
+                                            }
+                                            else buffer[ii, 0] = Type.Missing;
+                                        }
+                                        try
+                                        {
+                                            Excel.Range? startCell = null;
+                                            Excel.Range? endCell = null;
+                                            Excel.Range? range = null;
+                                            try
+                                            {
+                                                startCell = sheet.Cells[startRowAbs, remarkColAbs] as Excel.Range;
+                                                endCell = sheet.Cells[endRowAbs, remarkColAbs] as Excel.Range;
+                                                range = (startCell != null && endCell != null) ? sheet.Range[startCell, endCell] as Excel.Range : null;
+                                                if (range != null) range.Value2 = buffer;
+                                            }
+                                            finally
+                                            {
+                                                try { if (range != null) ReleaseComObjectSafe(range); } catch { }
+                                                try { if (startCell != null) ReleaseComObjectSafe(startCell); } catch { }
+                                                try { if (endCell != null) ReleaseComObjectSafe(endCell); } catch { }
+                                            }
+                                        }
+                                        catch (Exception ex)
+                                        {
+                                            try { localWarnings.Add($"Batch remark write [{startRowAbs}-{endRowAbs}] failed: {ex.Message}"); } catch { }
+                                            for (int r = startRowAbs; r <= endRowAbs; r++)
+                                            {
+                                                try
+                                                {
+                                                    if (remarkUpdates.TryGetValue(r, out object rv))
+                                                    {
+                                                        var rvStr = rv?.ToString() ?? string.Empty;
+                                                        try
+                                                        {
+                                                            var cell = sheet.Cells[r, remarkColAbs] as Excel.Range;
+                                                            if (cell != null) cell.Value2 = SanitizeRemarkForExcel(rvStr);
+                                                            else sheet.Cells[r, remarkColAbs] = SanitizeRemarkForExcel(rvStr);
+                                                        }
+                                                        catch { try { sheet.Cells[r, remarkColAbs] = SanitizeRemarkForExcel(rvStr); } catch { } }
+                                                    }
+                                                }
+                                                catch { }
+                                            }
+                                        }
+                                    }
+                                    catch { }
+                                };
+
+                                for (int k = 1; k < rrows.Length; k++)
+                                {
+                                    if (rrows[k] == rsegPrev + 1)
+                                    {
+                                        rsegPrev = rrows[k];
+                                        continue;
+                                    }
+                                    writeRemarkWindow(rsegStart, rsegPrev);
+                                    rsegStart = rrows[k];
+                                    rsegPrev = rrows[k];
+                                }
+                                writeRemarkWindow(rsegStart, rsegPrev);
+                            }
+                        }
+                        catch { }
+
                         // 【優化】簡化保護邏輯，減少 COM 呼叫
                         try
                         {
@@ -6358,7 +7998,7 @@ namespace Automatic_Storage
                             try
                             {
                                 // 盡量使用與 AppendRecordsToLogSheet 相同的邏輯，但在此使用已開啟的 wb 與 sheet
-                                Excel.Worksheet wsLog = null;
+                                Excel.Worksheet? wsLog = null;
                                 try
                                 {
                                     try { wsLog = wb.Worksheets["記錄"] as Excel.Worksheet; } catch { wsLog = null; }
@@ -6378,10 +8018,10 @@ namespace Automatic_Storage
                                         if (wsLog != null)
                                         {
                                             try { wsLog.Name = "記錄"; } catch { }
-                                            try { wsLog.Cells[1, 1].Value2 = "刷入時間"; } catch { }
-                                            try { wsLog.Cells[1, 2].Value2 = "料號"; } catch { }
-                                            try { wsLog.Cells[1, 3].Value2 = "數量"; } catch { }
-                                            try { wsLog.Cells[1, 4].Value2 = "操作者"; } catch { }
+                                            try { var _c = wsLog.Cells[1, 1] as Excel.Range; if (_c != null) _c.Value2 = "刷入時間"; else wsLog.Cells[1, 1] = "刷入時間"; } catch { }
+                                            try { var _c2 = wsLog.Cells[1, 2] as Excel.Range; if (_c2 != null) _c2.Value2 = "料號"; else wsLog.Cells[1, 2] = "料號"; } catch { }
+                                            try { var _c3 = wsLog.Cells[1, 3] as Excel.Range; if (_c3 != null) _c3.Value2 = "數量"; else wsLog.Cells[1, 3] = "數量"; } catch { }
+                                            try { var _c4 = wsLog.Cells[1, 4] as Excel.Range; if (_c4 != null) _c4.Value2 = "操作者"; else wsLog.Cells[1, 4] = "操作者"; } catch { }
                                             try { var hdr = wsLog.Range["A1:D1"]; hdr.HorizontalAlignment = Excel.XlHAlign.xlHAlignCenter; hdr.VerticalAlignment = Excel.XlVAlign.xlVAlignCenter; hdr.Font.Bold = true; } catch { }
                                         }
                                     }
@@ -6399,7 +8039,7 @@ namespace Automatic_Storage
                                         var usedLog = wsLog.UsedRange;
                                         if (usedLog != null)
                                         {
-                                            object[,] arr = null;
+                                            object?[,]? arr = null;
                                             try
                                             {
                                                 var v = usedLog.Value2;
@@ -6409,23 +8049,24 @@ namespace Automatic_Storage
                                                     arr = new object[usedLog.Rows.Count, usedLog.Columns.Count];
                                                     for (int rr = 1; rr <= usedLog.Rows.Count; rr++)
                                                         for (int cc = 1; cc <= usedLog.Columns.Count; cc++)
-                                                            arr[rr - 1, cc - 1] = (rr == 1 && cc == 1) ? v : null;
+                                                            arr[rr - 1, cc - 1] = (rr == 1 && cc == 1) ? v : (object?)null;
                                                 }
                                             }
                                             catch { arr = null; }
 
                                             if (arr != null)
                                             {
-                                                int rowCountArr = arr.GetLength(0);
+                                                var localArr = arr; // local non-nullable ref for analyzer
+                                                int rowCountArr = localArr.GetLength(0);
                                                 for (int r = 2; r <= rowCountArr; r++)
                                                 {
                                                     try
                                                     {
-                                                        object tObj = null, mObj = null, qvObj = null, uObj = null;
-                                                        try { tObj = arr[r - 1, 0]; } catch { }
-                                                        try { mObj = arr[r - 1, 1]; } catch { }
-                                                        try { qvObj = arr[r - 1, 2]; } catch { }
-                                                        try { uObj = arr[r - 1, 3]; } catch { }
+                                                        object? tObj = null; object? mObj = null; object? qvObj = null; object? uObj = null;
+                                                        try { tObj = localArr[r - 1, 0]; } catch { }
+                                                        try { mObj = localArr[r - 1, 1]; } catch { }
+                                                        try { qvObj = localArr[r - 1, 2]; } catch { }
+                                                        try { uObj = localArr[r - 1, 3]; } catch { }
 
                                                         var m = mObj?.ToString();
                                                         var qv = qvObj?.ToString();
@@ -6439,7 +8080,7 @@ namespace Automatic_Storage
 
                                                         if (dt == DateTime.MinValue) continue;
                                                         var timeKey = dt.ToString("yyyyMMddHHmmss");
-                                                        var key = $"{timeKey}|{NormalizeMaterialKey(m)}|{q}|{(u ?? string.Empty)}";
+                                                        var key = $"{timeKey}|{NormalizeMaterialKey(m ?? string.Empty)}|{q}|{(u ?? string.Empty)}";
                                                         existingKeys.Add(key);
                                                     }
                                                     catch { }
@@ -6456,7 +8097,7 @@ namespace Automatic_Storage
                                     {
                                         if (rec == null) continue;
                                         var recTimeKey = rec.刷入時間.ToString("yyyyMMddHHmmss");
-                                        var recKey = $"{recTimeKey}|{NormalizeMaterialKey(rec.料號)}|{rec.數量}|{(rec.操作者 ?? string.Empty)}";
+                                        var recKey = $"{recTimeKey}|{NormalizeMaterialKey(rec.料號 ?? string.Empty)}|{rec.數量}|{(rec.操作者 ?? string.Empty)}";
                                         if (existingKeys.Contains(recKey)) continue;
                                         if (batchKeys.Contains(recKey)) continue;
                                         batchKeys.Add(recKey);
@@ -6482,17 +8123,36 @@ namespace Automatic_Storage
                                         // Batch attempt
                                         try
                                         {
-                                            var startCell = wsLog.Cells[appendStartRow, 1];
-                                            var endCell = wsLog.Cells[appendStartRow + appendRowCount - 1, 4];
-                                            var range = wsLog.Range[startCell, endCell];
-                                            range.Value2 = data;
-                                            // 將 toAppend 全部視為成功新增
-                                            try { _lastAppendedRecords = toAppend.ToList(); } catch { }
-                                            // material write debug path removed
+                                            Excel.Range? startCell = null;
+                                            Excel.Range? endCell = null;
+                                            Excel.Range? range = null;
+                                            try
+                                            {
+                                                startCell = wsLog.Cells[appendStartRow, 1] as Excel.Range;
+                                                endCell = wsLog.Cells[appendStartRow + appendRowCount - 1, 4] as Excel.Range;
+                                                range = (startCell != null && endCell != null) ? (wsLog.Range[startCell, endCell] as Excel.Range) : null;
+                                                if (range != null)
+                                                {
+                                                    range.Value2 = data;
+                                                    try { _lastAppendedRecords = toAppend.ToList(); } catch { }
+                                                }
+                                                else
+                                                {
+                                                    throw new Exception("Range cast failed");
+                                                }
+                                            }
+                                            finally
+                                            {
+                                                try { if (range != null) ReleaseComObjectSafe(range); } catch { }
+                                                try { if (startCell != null) ReleaseComObjectSafe(startCell); } catch { }
+                                                try { if (endCell != null) ReleaseComObjectSafe(endCell); } catch { }
+                                            }
+
                                         }
-                                        catch (Exception)
+                                        catch (Exception ex)
                                         {
-                                            // 已移除：舊式臨時診斷檔路徑（excel_write_error.log）
+                                            try { localWarnings.Add($"Append to 記錄 worksheet batch failed: {ex.Message}"); } catch { }
+
 
                                             // fallback per-row
                                             try
@@ -6503,23 +8163,32 @@ namespace Automatic_Storage
                                                 {
                                                     try
                                                     {
-                                                        wsLog.Cells[rr, 1].Value2 = rec.刷入時間.ToString("yyyy/MM/dd HH:mm:ss");
-                                                        wsLog.Cells[rr, 2].Value2 = rec.料號;
-                                                        wsLog.Cells[rr, 3].Value2 = rec.數量;
-                                                        wsLog.Cells[rr, 4].Value2 = rec.操作者;
+                                                        var c1 = wsLog.Cells[rr, 1] as Excel.Range;
+                                                        var c2 = wsLog.Cells[rr, 2] as Excel.Range;
+                                                        var c3 = wsLog.Cells[rr, 3] as Excel.Range;
+                                                        var c4 = wsLog.Cells[rr, 4] as Excel.Range;
+                                                        try { if (c1 != null) c1.Value2 = rec.刷入時間.ToString("yyyy/MM/dd HH:mm:ss"); else wsLog.Cells[rr, 1] = rec.刷入時間.ToString("yyyy/MM/dd HH:mm:ss"); } catch { }
+                                                        try { if (c2 != null) c2.Value2 = rec.料號; else wsLog.Cells[rr, 2] = rec.料號; } catch { }
+                                                        try { if (c3 != null) c3.Value2 = rec.數量; else wsLog.Cells[rr, 3] = rec.數量; } catch { }
+                                                        try { if (c4 != null) c4.Value2 = rec.操作者; else wsLog.Cells[rr, 4] = rec.操作者; } catch { }
                                                         rr++;
                                                     }
                                                     catch { fallbackCount++; rr++; }
                                                 }
                                                 try { _lastAppendedRecords = toAppend.ToList(); } catch { }
-                                                // 已移除：舊式 material_write_debug.log 宣告（改用集中式 Logger）
+
                                             }
                                             catch { }
                                         }
                                     }
 
                                     // 為確保「記錄」工作表的 A:D 欄位可以完整顯示新增資料，僅針對該工作表執行 AutoFit
-                                    try { wsLog.Columns["A:D"].AutoFit(); } catch { }
+                                    try
+                                    {
+                                        var colRange = wsLog.Columns["A:D"] as Excel.Range;
+                                        if (colRange != null) colRange.AutoFit();
+                                    }
+                                    catch { }
                                     try { wsLog.Protect(string.IsNullOrEmpty(_cachedExcelPassword) ? Type.Missing : (object)_cachedExcelPassword, AllowFiltering: false); } catch { }
                                 }
                             }
@@ -6546,14 +8215,13 @@ namespace Automatic_Storage
                         try { if (prevScreenUpdating.HasValue) xlApp.ScreenUpdating = prevScreenUpdating.Value; } catch { }
                         try { wb.Close(false); } catch { }
                         try { xlApp.Quit(); } catch { }
-                        return (true, (string)null);
+                        return (true, MergeLocalWarnings(localWarnings, string.Empty));
                     }
                     catch (Exception ex)
                     {
                         try { if (wb != null) wb.Close(false); } catch { }
                         try { if (xlApp != null) xlApp.Quit(); } catch { }
-                        // Diagnostic: record full exception to excel_write_error.log to help reproduce COM/Excel errors
-                        // exception diagnostic write removed
+
                         return (false, ex.Message);
                     }
                     finally
@@ -6572,8 +8240,32 @@ namespace Automatic_Storage
                         catch { }
                     }
                 });
+                // 強化釋放後等待，確保 OS 解除 Excel 檔案鎖定
+                try
+                {
+                    int waitMs = 0;
+                    const int maxWaitMs = 2000;
+                    const int intervalMs = 200;
+                    while (waitMs < maxWaitMs)
+                    {
+                        GC.Collect();
+                        GC.WaitForPendingFinalizers();
+                        try
+                        {
+                            using (var fs = new FileStream(excelPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+                            {
+                                break; // 檔案已釋放
+                            }
+                        }
+                        catch
+                        {
+                            Thread.Sleep(intervalMs);
+                            waitMs += intervalMs;
+                        }
+                    }
+                }
+                catch { }
 
-                // result is (bool ok, string err)
                 // 【優化】簡化 GC 策略，減少等待時間 (省時 200+ms)
                 try
                 {
@@ -6595,7 +8287,7 @@ namespace Automatic_Storage
             }
         }
 
-        #endregion
+
 
         /// <summary>
         /// 將目前表單資料存回 Excel 的可等待方法（可被其他流程呼叫並回傳成功/失敗）。
@@ -6632,7 +8324,7 @@ namespace Automatic_Storage
             ShowOperationOverlay("存檔中，請稍候...");
             Application.UseWaitCursor = true;
             Cursor.Current = Cursors.WaitCursor;
-            try { await Task.Delay(80); } catch { }
+            try { await Task.Delay(80).ConfigureAwait(true); } catch { }
 
             bool _showFinalMsg = false;
             string? _finalMsg = null;
@@ -6641,7 +8333,28 @@ namespace Automatic_Storage
 
             try
             {
-                var dt = this.dgv備料單.DataSource as DataTable;
+                // 若使用者仍在編輯某個 Cell（尚未離開編輯模式），先強制提交編輯值
+                try
+                {
+                    if (this.dgv備料單 != null)
+                    {
+                        if (this.dgv備料單.IsCurrentCellInEditMode)
+                        {
+                            try { this.dgv備料單.EndEdit(); } catch { }
+                        }
+                        // 也嘗試透過 CurrencyManager/BindingContext 提交目前編輯以支援不同綁定情形
+                        try
+                        {
+                            var bc = this.BindingContext[this.dgv備料單.DataSource];
+                            var cm = bc as CurrencyManager;
+                            if (cm != null) { try { cm.EndCurrentEdit(); } catch { } }
+                        }
+                        catch { }
+                    }
+                }
+                catch { }
+
+                DataTable? dt = this.dgv備料單?.DataSource as DataTable;
                 if (dt == null || this._columnMapping == null)
                 {
                     _showFinalMsg = true; _finalMsg = "無可回寫的資料或欄位對應遺失。"; _finalTitle = "存檔"; _finalIcon = MessageBoxIcon.Warning;
@@ -6662,9 +8375,6 @@ namespace Automatic_Storage
                         int retryCount = 0;
                         // 檢查檔案是否被鎖定
                         bool isLocked = IsFileLocked(this.currentExcelPath ?? string.Empty);
-
-                        // initial file-lock diagnostic removed
-
                         while (isLocked)
                         {
                             retryCount++;
@@ -6693,26 +8403,9 @@ namespace Automatic_Storage
                                 return result;
                             }
 
-                            // 使用者選擇重試：進行強制 GC + 等候再檢查（避免 busy-loop）
-                            try
-                            {
-                                GC.Collect();
-                                GC.WaitForPendingFinalizers();
-                                GC.Collect();
-                                await Task.Delay(1500);  // 等待 1.5 秒再檢查
-                            }
-                            catch { }
-
-                            // 重新檢查是否仍被鎖定
+                            try { await Task.Delay(1500).ConfigureAwait(true); } catch { }
                             isLocked = IsFileLocked(this.currentExcelPath ?? string.Empty);
-
-                            // retry check diagnostic removed
                         }
-                    }
-                    else
-                    {
-                        // 【診斷】記錄為何跳過檔案鎖定檢查
-                        // skipped file-lock check diagnostic removed
                     }
 
                     // 檔案已確認可以寫入，開始嘗試寫入並進行智能重試
@@ -6721,120 +8414,72 @@ namespace Automatic_Storage
                     {
                         try
                         {
-                            // 在每次寫入前清理系統狀態
-                            GC.Collect();
-                            GC.WaitForPendingFinalizers();
-                            GC.Collect();
-
                             if (attempt > 0)
                             {
-                                try { await Task.Delay(2000 * attempt); } catch { }  // 指數退避延遲
+                                try { await Task.Delay(2000 * attempt).ConfigureAwait(true); } catch { }
                             }
 
-                            // 【最終安全檢查】在真正寫入前,再次確認檔案可寫入且沒有 Excel 程序鎖定
                             if (!string.IsNullOrWhiteSpace(this.currentExcelPath) && File.Exists(this.currentExcelPath))
                             {
-                                // 檢查是否仍有 Excel 程序執行中
                                 var excelProcs = System.Diagnostics.Process.GetProcessesByName("EXCEL");
                                 if (excelProcs.Length > 0)
                                 {
-                                    // 嘗試檢查檔案是否真的可寫入
                                     bool isStillLocked = IsFileLocked(this.currentExcelPath ?? string.Empty);
                                     if (isStillLocked)
                                     {
                                         ok = false;
                                         err = "檔案仍被 Excel 程序鎖定,無法寫入。請確保 Excel 已完全關閉。";
-                                        // final safety-check diagnostic removed
-                                        break;  // 停止重試,直接失敗
+                                        break;
                                     }
                                 }
                             }
 
-                            // Measure total time for the full writeback (main sheet write + record append)
-                            // __writeSw timing removed (Start)
-                            // 啟用合併 append 行為，避免後續重複開檔造成額外延遲
                             try { _mergeAppendIntoWriteBack = true; } catch { }
                             try
                             {
-                                ok = await Task.Run(() => WriteBackShippedQuantitiesToExcelBatch(this.currentExcelPath ?? string.Empty, dt, this._columnMapping, pwd, out err));
+                                ok = await Task.Run(() => WriteBackShippedQuantitiesToExcelBatch(this.currentExcelPath ?? string.Empty, dt, this._columnMapping, pwd, out err)).ConfigureAwait(true);
                             }
-                            finally
-                            {
-                                try { _mergeAppendIntoWriteBack = false; } catch { }
-                            }
+                            finally { try { _mergeAppendIntoWriteBack = false; } catch { } }
 
                             if (ok)
                             {
-                                // 寫入成功，進行強制垃圾回收以清理 COM 物件參考
+                                // 強化釋放後等待，確保 OS 解除 Excel 檔案鎖定
                                 try
                                 {
-                                    GC.Collect();
-                                    GC.WaitForPendingFinalizers();
-                                    GC.Collect();
-                                    // 以保守輪詢替代固定等待：嘗試以非獨佔方式打開檔案，若可開啟則立即繼續
-                                    try
+                                    int waitMs = 0;
+                                    const int maxWaitMs = 3000;
+                                    const int intervalMs = 250;
+                                    while (waitMs < maxWaitMs)
                                     {
-                                        var exeDir = AppDomain.CurrentDomain.BaseDirectory ?? Directory.GetCurrentDirectory();
-                                        // diagnostic material_write_debug path removed
-                                        int maxWaitMs = 3000;
-                                        int intervalMs = 150;
-                                        int waited = 0;
-                                        bool released = false;
-
-                                        while (waited < maxWaitMs)
+                                        GC.Collect();
+                                        GC.WaitForPendingFinalizers();
+                                        try
                                         {
-                                            try
+                                            if (!string.IsNullOrEmpty(this.currentExcelPath))
                                             {
                                                 using (var fs = new FileStream(this.currentExcelPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
                                                 {
-                                                    // able to open exclusively -> file released
-                                                    released = true;
                                                     break;
                                                 }
                                             }
-                                            catch
-                                            {
-
-                                                try { await Task.Delay(intervalMs); } catch { }
-                                                waited += intervalMs;
-                                            }
+                                            else break;
                                         }
-                                        try
+                                        catch
                                         {
-                                            try { } catch { }
+                                            try { await Task.Delay(intervalMs).ConfigureAwait(true); } catch { }
+                                            waitMs += intervalMs;
                                         }
-                                        catch { }
                                     }
-                                    catch { }
                                 }
                                 catch { }
-                                break;  // 成功，退出重試迴圈
-                            }
-                            else
-                            {
-                                // 寫入失敗，嘗試重試
-                                if (attempt < maxWriteRetries - 1)
-                                {
-                                    // Debug log removed
-                                }
-                                else
-                                {
-                                    // 最後一次嘗試失敗
-                                    // Debug log removed
-                                }
+                                break;
                             }
                         }
                         catch (Exception exWrite)
                         {
                             err = exWrite.Message;
-                            if (attempt < maxWriteRetries - 1)
-                            {
-                                // Debug log removed
-                            }
-                            else
-                            {
-                                ok = false;
-                            }
+                            if (attempt < maxWriteRetries - 1) { }
+                            else { ok = false; }
                         }
                     }
                 }
@@ -6848,31 +8493,16 @@ namespace Automatic_Storage
                     _showFinalMsg = true; _finalMsg = "存檔失敗：" + (err ?? "未知錯誤"); _finalTitle = "錯誤"; _finalIcon = MessageBoxIcon.Error;
                     result.Success = false;
                     result.ErrorMessage = err;
-                    // failure diagnostic removed
                 }
                 else
                 {
-                    // 【修訂】若 WriteBackShippedQuantitiesToExcelBatch 已回傳 ok=true，
-                    // 直接信任其結果，不再做嚴格的時間戳驗證（因系統可能有時間延遲）
                     if (ok)
                     {
-                        // 驗證成功，記錄存檔完成
-                        // 暫停 dirty marking，避免後續操作誤觸 _isDirty 更新
                         bool prevSuspend = _suspendDirtyMarking;
-                        try { _suspendDirtyMarking = true; }
-                        catch { }
+                        try { _suspendDirtyMarking = true; } catch { }
 
-                        // 當 _mergeAppendIntoWriteBack 為 true 時，AppendRecords 已由 WriteBackShippedQuantitiesToExcelBatch
-                        // 在同一 Workbook session 中完成；不再於此處另行開啟工作簿以避免重複開關檔案。
-                        finally
-                        {
-                            try { /* timing removed: __writeSw stop/elapsed */ } catch { }
-                        }
-
-                        // 不要清空 _lastAppendedRecords（這會移除剛記錄的已新增清單），僅清空原始待寫清單 _records
                         try { _records?.Clear(); } catch { }
 
-                        // 清空 DataTable 的變更追蹤（呼叫 AcceptChanges），確保存檔後沒有未儲存的變更記錄
                         try
                         {
                             if (dt != null)
@@ -6883,7 +8513,42 @@ namespace Automatic_Storage
                         }
                         catch { }
 
-                        // 確保 _isDirty 在 dirty marking 暫停時被設為 false
+                        try
+                        {
+                            DataTable? dbTable = dt != null ? dt.Copy() : null;
+                            try { if (!string.IsNullOrEmpty(this.currentExcelPath) && dbTable != null) await Task.Run(() => ExcelInteropHelper.RemoveHiddenColumnsFromDataTable(this.currentExcelPath!, dbTable)).ConfigureAwait(true); } catch { }
+
+                            if (dbTable != null)
+                            {
+                                string savedPathLocal = string.Empty;
+                                if (!string.IsNullOrEmpty(this.currentExcelPath) && File.Exists(this.currentExcelPath))
+                                {
+                                    try
+                                    {
+                                        savedPathLocal = await Task.Run(() => CopyOriginalFileToFolder(this.currentExcelPath!)).ConfigureAwait(true);
+                                    }
+                                    catch { savedPathLocal = string.Empty; }
+                                }
+
+                                Exception? dbEx = null;
+                                try
+                                {
+                                    await Task.Run(() => InsertImportFileAndRows(dbTable, Path.GetFileName(this.currentExcelPath ?? string.Empty), savedPathLocal, operatorName)).ConfigureAwait(true);
+                                }
+                                catch (Exception exDb)
+                                {
+                                    dbEx = exDb;
+                                }
+
+                                if (dbEx != null)
+                                {
+                                    try { _ = System.Threading.Tasks.Task.Run(() => Automatic_Storage.Utilities.Logger.LogErrorAsync($"匯入資料寫入 DB 失敗: {dbEx.Message}")); } catch { }
+                                    try { MessageBox.Show(this, $"匯入資料寫入 DB 例外: {dbEx.Message}", "DB 錯誤", MessageBoxButtons.OK, MessageBoxIcon.Error); } catch { }
+                                }
+                            }
+                        }
+                        catch { }
+
                         try { _isDirty = false; } catch { }
 
                         _showFinalMsg = true;
@@ -6894,29 +8559,24 @@ namespace Automatic_Storage
                         result.Success = true;
                         result.ErrorMessage = string.Empty;
 
-                        // 恢復 dirty marking 狀態
                         try { _suspendDirtyMarking = prevSuspend; } catch { }
                     }
                 }
             }
             finally
             {
-                // 優先還原游標：確保即使失敗也立即還原
                 try { Cursor.Current = prevCursor; } catch { }
                 try { Application.UseWaitCursor = prevUseWaitCursorLocal; } catch { }
                 try { HideOperationOverlay(); } catch { }
 
-                // 在還原 UI 時暫停 dirty marking，防止無意間觸發
                 bool prevSuspend2 = _suspendDirtyMarking;
                 try { _suspendDirtyMarking = true; } catch { }
 
                 try { RestoreAllButtons(); } catch { }
                 _isSaving = false;
                 UpdateButtonStates();
-                // 確保按鈕狀態符合實際資料情況
                 try { UpdateMainButtonsEnabled(); } catch { }
 
-                // 恢復 dirty marking 狀態
                 try { _suspendDirtyMarking = prevSuspend2; } catch { }
 
                 try
@@ -6965,7 +8625,7 @@ namespace Automatic_Storage
                 // 同步嘗試將錯誤寫入集中式 Logger（非必要，若 Logger 發生例外則忽略）
                 try
                 {
-                    try { Automatic_Storage.Utilities.Logger.LogErrorAsync($"Save failed: {errorMsg}").GetAwaiter().GetResult(); } catch { }
+                    try { _ = System.Threading.Tasks.Task.Run(() => Automatic_Storage.Utilities.Logger.LogErrorAsync($"Save failed: {errorMsg}")); } catch { }
                 }
                 catch { }
 
@@ -7002,14 +8662,34 @@ namespace Automatic_Storage
             catch (Exception ex)
             {
                 // 保留原有錯誤處理
-                try { Automatic_Storage.Utilities.Logger.LogErrorAsync($"Excel 寫入失敗: {ex.Message}").GetAwaiter().GetResult(); } catch { }
+                try { _ = System.Threading.Tasks.Task.Run(() => Automatic_Storage.Utilities.Logger.LogErrorAsync($"Excel 寫入失敗: {ex.Message}")); } catch { }
             }
             // 若都無法寫入，回傳空集合
             return new List<Dto.記錄Dto>();
         }
 
+
+        #region Merge Warnings Helper
+        /// <summary>
+        /// 合併本次 STA 執行緒收集到的非致命警告訊息，並與既有錯誤訊息合併。
+        /// </summary>
+        /// <param name="localWarnings">本次執行過程中收集到的警告訊息清單。</param>
+        /// <param name="existingErr">既有的錯誤訊息（可為空字串）。</param>
+        /// <returns>合併後的錯誤與警告訊息字串。</returns>
+        private string MergeLocalWarnings(System.Collections.Generic.List<string> localWarnings, string existingErr)
+        {
+            try
+            {
+                if (localWarnings == null || localWarnings.Count == 0) return existingErr ?? string.Empty;
+                var joined = string.Join("; ", localWarnings.Where(s => !string.IsNullOrWhiteSpace(s)));
+                if (string.IsNullOrWhiteSpace(existingErr)) return joined;
+                return existingErr + " | Warnings: " + joined;
+            }
+            catch
+            {
+                return existingErr ?? string.Empty;
+            }
+        }
         #endregion
-
     }
-
 }
