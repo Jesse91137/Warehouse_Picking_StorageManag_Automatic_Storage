@@ -27,6 +27,17 @@ namespace Automatic_Storage
             /// </summary>
             Application.SetCompatibleTextRenderingDefault(false);
 
+            // 確保 Upload 資料夾存在
+            try
+            {
+                string uploadDir = Path.Combine(Application.StartupPath, "Upload");
+                if (!Directory.Exists(uploadDir)) Directory.CreateDirectory(uploadDir);
+            }
+            catch
+            {
+                // CreateDirectory 可能因權限限制失敗，忽略該例外讓應用程式繼續執行
+            }
+
             /// <summary>
             /// 啟動主視窗 Form1，進入應用程式主循環。
             /// </summary>
