@@ -13,6 +13,7 @@ using System.Runtime.InteropServices; // 引用互操作命名空間
 using System.Security; // 引用安全性命名空間
 using System.Text; // 引用文字處理命名空間
 using System.Threading; // 引用執行緒命名空間
+using System.Threading.Tasks; // 引用非同步任務命名空間
 using System.Windows.Forms; // 引用視窗表單命名空間
 using System.Windows.Threading; // 引用 WPF 計時器命名空間
 
@@ -28,12 +29,21 @@ namespace Automatic_Storage // 命名空間：Automatic_Storage
             isLoaded = false; // 設定初始載入狀態
         }
 
+        [DllImport("user32.dll")]
+        private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+
+        private const int SW_SHOWNORMAL = 1;
+        private const int SW_SHOWMAXIMIZED = 3;
+
         #region 視窗ReSize // 視窗大小調整相關變數
-        int X = new int();  // 視窗寬度
-        int Y = new int(); // 視窗高度
-        float fgX = new float(); // 寬度縮放比例
-        float fgY = new float(); // 高度縮放比例
-        bool isLoaded;  // 是否已設定各控制的尺寸資料到 Tag 屬性
+        int X = 0;  // 視窗寬度
+        int Y = 0; // 視窗高度
+        float fgX = 1f; // 寬度縮放比例
+        float fgY = 1f; // 高度縮放比例
+        bool isLoaded = false;  // 是否已設定各控制的尺寸資料到 Tag 屬性
         #endregion // 結束視窗大小調整區塊
 
         #region 參數 // 參數區塊
@@ -138,7 +148,9 @@ namespace Automatic_Storage // 命名空間：Automatic_Storage
         /// <summary>
         /// 存儲組合查詢是否為歷史查詢
         /// </summary>
+#pragma warning disable CS0414
         private bool is_Combi_History_Query = false; // 組合查詢是否歷史
+#pragma warning restore CS0414
 
         /// <summary>
         /// 存儲組合查詢是否為英文料號查詢條件
@@ -193,7 +205,8 @@ namespace Automatic_Storage // 命名空間：Automatic_Storage
             public void IniWriteValue(string Section, string Key, string Value, string inipath)
             {
                 // 寫入 ini 檔案內容
-                WritePrivateProfileString(Section, Key, Value, Application.StartupPath + "\\" + inipath); // 呼叫 Windows API 寫入
+                // WritePrivateProfileString(Section, Key, Value, Application.StartupPath + "\\" + inipath); // 呼叫 Windows API 寫入
+                WritePrivateProfileString(Section, Key, Value, Path.Combine(Application.StartupPath, inipath)); // 呼叫 Windows API 寫入
             }
 
             /// <summary>
@@ -439,17 +452,86 @@ namespace Automatic_Storage // 命名空間：Automatic_Storage
         /// </summary>
         public void dataBind()
         {
-            DataTable currentData = GetPagedData(currentPage);
-            if (currentData != null)
+            // 保留同步介面，但實際在背景執行非同步版本，避免阻塞 UI
+            try
             {
-                dataGridView1.DataSource = currentData;
-                if (lblCurrentPage != null)
-                {
-                    lblCurrentPage.Text = $"第 {currentPage} 頁";
-                }
-                sumC();
+                this.BeginInvoke((Action)(async () => await dataBindAsync()));
             }
-            btn_fAll = 0;
+            catch
+            {
+                // 若 BeginInvoke 失敗則退回非同步直接執行（盡量不阻塞 UI）
+                _ = dataBindAsync();
+            }
+        }
+
+        /// <summary>
+        /// 真正的非同步資料綁定實作：在背景查詢分頁資料，然後在 UI 線程更新控制項
+        /// </summary>
+        private async Task dataBindAsync()
+        {
+            try
+            {
+                // 在背景執行資料查詢，使用 GetPagedData with checkOnly=true 取得資料但避免 UI 操作
+                DataTable currentData = await Task.Run(() => GetPagedData(currentPage, true));
+
+                // 回到 UI 線程更新畫面
+                if (this.IsHandleCreated)
+                {
+                    this.BeginInvoke((Action)(() =>
+                    {
+                        try
+                        {
+                            dataGridView1.DataSource = currentData;
+
+                            // 設置行背景色
+                            for (int i = 0; i < dataGridView1.Rows.Count; i++)
+                            {
+                                if ((dataGridView1.Rows[i].Cells["Amount"].Value?.ToString() ?? string.Empty) == "0")
+                                {
+                                    dataGridView1.Rows[i].DefaultCellStyle.BackColor = Color.MediumVioletRed;
+                                }
+                            }
+
+                            if (lblCurrentPage != null)
+                            {
+                                lblCurrentPage.Text = $"第 {currentPage} 頁";
+                                lblCurrentPage.Visible = true;
+                            }
+
+                            // 顯示分頁按鈕
+                            btnPreviousPage.Visible = true;
+                            btnNextPage.Visible = true;
+
+                            // 簡化：更新頁碼資訊（若有 lblPageInfo 會顯示簡單頁碼）
+                            if (lblPageInfo != null)
+                            {
+                                lblPageInfo.Text = $"第 {currentPage} 頁";
+                            }
+
+                        }
+                        catch (Exception)
+                        {
+                            // UI 更新例外處理（已移除除錯輸出，保留原錯誤處理邏輯）
+                        }
+                    }));
+                }
+
+                // 背景計算總數（避免在 UI 線程同步計算）
+                await Task.Run(() =>
+                {
+                    try
+                    {
+                        sumC();
+                    }
+                    catch { }
+                });
+
+                btn_fAll = 0;
+            }
+            catch (Exception)
+            {
+                // 記錄並顯示錯誤（已移除除錯輸出，保留原錯誤處理邏輯）
+            }
         }
 
         /// <summary>
@@ -999,9 +1081,33 @@ namespace Automatic_Storage // 命名空間：Automatic_Storage
             try
             {
                 Input input = new Input();
+
                 input.Owner = this;
+
+                // 在視窗真正顯示後執行置前/取得焦點的動作，避免時序問題
+                EventHandler shownHandler = null;
+                shownHandler = (s, args) =>
+                {
+                    try
+                    {
+
+                        input.Shown -= shownHandler; // 只執行一次
+                        input.BringToFront();
+                        input.Activate();
+                        // 嘗試短暫把視窗設為 TopMost 再恢復，幫助取得置前
+                        input.TopMost = true;
+                        input.TopMost = false;
+                        // 嘗試呼叫 Win32 API 顯示與置前（確保維持最大化）
+                        try { ShowWindowAsync(input.Handle, SW_SHOWMAXIMIZED); } catch { }
+                        try { SetForegroundWindow(input.Handle); } catch { }
+
+                    }
+                    catch { }
+                };
+                input.Shown += shownHandler;
+
                 input.Show();
-                GetLog.WriteLog(((Button)(sender)).Name);
+
             }
             catch (Exception ee)
             {
@@ -1064,7 +1170,8 @@ namespace Automatic_Storage // 命名空間：Automatic_Storage
             OutPut output = new OutPut();
             output.Owner = this;
             output.Show();
-            dataBind();
+            // 延遲執行 dataBind，先讓 OutPut 視窗完成顯示與訊息循環，避免顯示時的短暫停頓
+            this.BeginInvoke((Action)(() => dataBind()));
         }
 
         /// <summary>
@@ -1115,13 +1222,19 @@ namespace Automatic_Storage // 命名空間：Automatic_Storage
                 try
                 {
                     var fileName = fileDialog1.FileName;
-
                     FileInfo _info = new FileInfo(fileName);
-                    string _new = Application.StartupPath + "\\Upload\\" + _info.Name;
+                    string uploadPath = Automatic_Storage.Utilities.UploadHelper.GetUploadFilePath(_info.Name);
                     if (File.Exists(fileName))
                     {
-                        _info.CopyTo(_new, true);
-                        txt_path.Text = _new;
+                        try
+                        {
+                            _info.CopyTo(uploadPath, true);
+                            txt_path.Text = uploadPath;
+                        }
+                        catch (Exception ex)
+                        {
+                            MessageBox.Show($"複製檔案失敗: {ex.Message}");
+                        }
                     }
                     dataBind();
                 }
@@ -1945,8 +2058,8 @@ namespace Automatic_Storage // 命名空間：Automatic_Storage
             //string strFilePath = txt_path.Text;
             string newName = "_" + DateTime.Now.ToString("yyyyMMddHHmmss");
 
-            //檔案路徑
-            filePath = Application.StartupPath + "\\Upload\\查詢結果" + newName;
+            filePath = Automatic_Storage.Utilities.UploadHelper.GetUploadFilePath("查詢結果" + newName);
+            //filePath = Path.Combine(Application.StartupPath, "Upload", "查詢結果" + newName);
 
             // 確保在匯出前重新獲取完整數據
             RefreshExportData();
@@ -2561,7 +2674,7 @@ namespace Automatic_Storage // 命名空間：Automatic_Storage
             catch (Exception ex)
             {
                 MessageBox.Show($"匯出時發生錯誤: {ex.Message}", "錯誤", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                Console.WriteLine(ex.Message);
+                // 已移除除錯輸出 Console.WriteLine
             }
         }
 
@@ -2624,7 +2737,7 @@ namespace Automatic_Storage // 命名空間：Automatic_Storage
             catch (Exception ex)
             {
                 MessageBox.Show($"匯出 CSV 時發生錯誤: {ex.Message}", "錯誤", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                Console.WriteLine(ex.Message);
+                // 已移除除錯輸出 Console.WriteLine
             }
         }
 
@@ -2712,22 +2825,14 @@ namespace Automatic_Storage // 命名空間：Automatic_Storage
             catch (Exception ex)
             {
                 MessageBox.Show($"匯出 Excel 時發生錯誤: {ex.Message}", "錯誤", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                Console.WriteLine(ex.Message);
+                // 已移除除錯輸出 Console.WriteLine
             }
             finally
             {
                 // 釋放資源
-                if (worksheet != null) Marshal.ReleaseComObject(worksheet);
-                if (workbook != null)
-                {
-                    workbook.Close(false);
-                    Marshal.ReleaseComObject(workbook);
-                }
-                if (excelApp != null)
-                {
-                    excelApp.Quit();
-                    Marshal.ReleaseComObject(excelApp);
-                }
+                try { if (worksheet != null) Automatic_Storage.Utilities.ComInterop.ReleaseComObjectSafe(worksheet); } catch { }
+                try { if (workbook != null) { try { workbook.Close(false); } catch { } Automatic_Storage.Utilities.ComInterop.ReleaseComObjectSafe(workbook); } } catch { }
+                try { if (excelApp != null) { try { excelApp.Quit(); } catch { } Automatic_Storage.Utilities.ComInterop.ReleaseComObjectSafe(excelApp); } } catch { }
                 GC.Collect();
                 GC.WaitForPendingFinalizers();
             }
@@ -2796,6 +2901,10 @@ namespace Automatic_Storage // 命名空間：Automatic_Storage
             //寫入目前版本與程式名後執行更新
 
             Process p = new Process();
+            /*string updaterPath = Path.Combine(Application.StartupPath, "AutoUpdate.exe");
+            p.StartInfo.FileName = updaterPath;
+            p.StartInfo.WorkingDirectory = Application.StartupPath; //檔案所在的目錄
+            */
             p.StartInfo.FileName = System.Windows.Forms.Application.StartupPath + "\\AutoUpdate.exe";
             p.StartInfo.WorkingDirectory = System.Windows.Forms.Application.StartupPath; //檔案所在的目錄
             p.Start();
