@@ -3,6 +3,9 @@ using System.Data;
 using System.Data.SqlClient;
 using System.Drawing;
 using System.Windows.Forms;
+using System.Threading.Tasks;
+using System.IO;
+using System.Diagnostics;
 
 namespace Automatic_Storage
 {
@@ -78,11 +81,6 @@ namespace Automatic_Storage
         #endregion
 
         /// <summary>
-        /// 事件記錄器。
-        /// </summary>
-        _Logger logger = new _Logger();
-
-        /// <summary>
         /// 關閉按鈕事件，關閉表單並刷新主畫面資料。
         /// </summary>
         private void button2_Click(object sender, EventArgs e)
@@ -97,17 +95,36 @@ namespace Automatic_Storage
         /// </summary>
         private void txt_Item1_KeyPress(object sender, KeyPressEventArgs e)
         {
-            if (e.KeyChar == 13 && !string.IsNullOrEmpty(ActiveControl.Text))
+            if (e.KeyChar == 13 && !string.IsNullOrEmpty(ActiveControl?.Text))
             {
-                string auditCMC = txt_Item1.Text[txt_Item1.Text.Length - 4].ToString().ToUpper();
-
-                if (auditCMC == "A")
+                try
                 {
-                    labCMC.Visible = true;
+                    var text = txt_Item1.Text?.Trim();
+                    if (!string.IsNullOrEmpty(text) && (text?.Length ?? 0) >= 4)
+                    {
+                        string auditCMC = text![(text!.Length - 4)].ToString().ToUpper();
+                        if (auditCMC == "A")
+                        {
+                            labCMC.Visible = true;
+                        }
+                        else
+                        {
+                            labCMC.Visible = false;
+                        }
+                    }
+                    else
+                    {
+                        labCMC.Visible = false;
+                    }
                 }
+                catch (Exception ex)
+                {
+                    LogException(ex, "txt_Item1_KeyPress");
+                    try { MessageBox.Show("料號處理發生錯誤，請聯絡系統管理員。"); } catch { }
+                }
+
                 // 將焦點移至儲位輸入框
                 txt_Amount.Focus();
-                //cbx_package.Focus();
             }
         }
 
@@ -140,13 +157,30 @@ namespace Automatic_Storage
         /// <summary>
         /// 初始化下拉選單資料來源。
         /// </summary>
-        private void init_Data()
+        private async void init_Data()
         {
+            /* 包裝種類 */
             string strsql = "select Package_View,code from Automatic_Storage_Package";
-            DataSet cbx_ds = db.ExecuteDataSet(strsql, CommandType.Text, null);
-            foreach (DataRow dr in cbx_ds.Tables[0].Rows)
+            try
             {
-                cbx_package.Items.Add(new MyItem(dr["Package_View"].ToString(), dr["code"].ToString()));
+                // 顯示等待游標，提示使用者正在載入
+                try { this.Cursor = Cursors.WaitCursor; } catch { }
+                // 在背景執行查詢，避免在 UI 執行緒造成阻塞
+                DataSet cbx_ds = await Task.Run(() => db.ExecuteDataSet(strsql, CommandType.Text, System.Array.Empty<SqlParameter>()));
+                if (cbx_ds != null && cbx_ds.Tables.Count > 0)
+                {
+                    // 在 UI 執行緒新增選項
+                    foreach (DataRow dr in cbx_ds.Tables[0].Rows)
+                    {
+                        cbx_package.Items.Add(new MyItem(dr["Package_View"].ToString(), dr["code"].ToString()));
+                    }
+                }
+                try { this.Cursor = Cursors.Default; } catch { }
+            }
+            catch (Exception ex)
+            {
+                // 若發生例外，記錄或顯示錯誤，但不阻塞 UI
+                try { MessageBox.Show("載入包裝資料失敗: " + ex.Message); } catch { }
             }
         }
 
@@ -169,8 +203,6 @@ namespace Automatic_Storage
                 }
             }
             cbx_package.SelectedIndex = -1;
-            //txtbox1.Text = "1";
-            //txt_Amount_U.Text = "1";
             txt_Item1.Enabled = true;
             txt_item2.Enabled = true;
             txt_Item1.Focus();
@@ -178,7 +210,7 @@ namespace Automatic_Storage
         }
 
         /// <summary>
-        /// 單筆入庫按鈕事件，執行入庫資料新增或更新。
+        /// 儲位明細-單筆入庫按鈕事件，執行入庫資料新增或更新。
         /// </summary>
         private void btn_only_commit_Click(object sender, EventArgs e)
         {
@@ -190,6 +222,7 @@ namespace Automatic_Storage
             try
             {
                 TextBox[] b = new TextBox[1] { txt_Storage1 }; //儲位
+                /* 儲位表頭 */
                 string strsql_p = @"select * from Automatic_Storage_Position where Position=@position and Unit_no=@unitno";
                 SqlParameter[] parm_p = new SqlParameter[]
                 {
@@ -291,26 +324,7 @@ namespace Automatic_Storage
                                     //資料已存在update Amount+1 ,Amount_Unit+1
                                     sqldetail = @"update Automatic_Storage_Detail set Amount=Amount+@Amount, Mark=@Mark ,PCB_DC=@pcbdc , CMC_DC = @cmcdc ";
                                     sqldetail += @" where Sno = @Sno";
-                                    //if (txt_Item1.Enabled)
-                                    //{
-                                    //    sqldetail += @"where Item_No_Master=@item_ms and Position=@Position 
-                                    //                                and Package=@Package and Actual_InDate=@actualDate and Mark = @mark";
-                                    //}
-                                    //if (txt_item2.Enabled)
-                                    //{
-                                    //    sqldetail += @"where Item_No_Slave=@item_ms and Position=@Position 
-                                    //                                    and Package=@Package and Actual_InDate=@actualDate";
-                                    //}
-                                    //if (!string.IsNullOrEmpty(master))
-                                    //{
-                                    //    sqldetail+= @"where Item_No_Master=@item_ms and Position=@Position 
-                                    //                                and Package=@Package and Actual_InDate=@actualDate";
-                                    //}
-                                    //else if (!string.IsNullOrEmpty(slave))
-                                    //{
-                                    //    sqldetail += @"where Item_No_Slave=@item_ms and Position=@Position 
-                                    //                                and Package=@Package and Actual_InDate=@actualDate";
-                                    //}
+
                                     SqlParameter[] parm2 = new SqlParameter[]
                                     {
                                         new SqlParameter("Amount",amount),
@@ -371,7 +385,6 @@ namespace Automatic_Storage
                 txt_clearn();
                 labCMC.Visible = false;
 
-                //Response.Write(" <script>window.opener = null;window.open('', '_parent', '');window.self.close();</script>");
             }
             catch (Exception ex)
             {
@@ -451,6 +464,39 @@ namespace Automatic_Storage
         }
 
         /// <summary>
+        /// 將發生的例外寫入錯誤日誌，包含來源與檔案/行號（若可取得）。
+        /// </summary>
+        /// <param name="ex">例外物件。</param>
+        /// <param name="context">額外的上下文字串，用來說明發生位置。</param>
+        private void LogException(Exception ex, string context)
+        {
+            try
+            {
+                var sb = new System.Text.StringBuilder();
+                sb.AppendLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {context} - {ex.GetType()}: {ex.Message}");
+                // 嘗試取得具檔案與行號的 StackTrace 資訊
+                try
+                {
+                    var st = new StackTrace(ex, true);
+                    for (int i = 0; i < st.FrameCount; i++)
+                    {
+                        var frame = st.GetFrame(i);
+                        if (frame == null) continue;
+                        var file = frame.GetFileName();
+                        var line = frame.GetFileLineNumber();
+                        sb.AppendLine($"   at {frame.GetMethod()} in {file}:{line}");
+                    }
+                }
+                catch { }
+                sb.AppendLine(ex.StackTrace ?? "");
+
+                string logPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "error.log");
+                File.AppendAllText(logPath, sb.ToString());
+            }
+            catch { }
+        }
+
+        /// <summary>
         /// Input 表單顯示事件。
         /// 當 Input 表單顯示時，將視窗狀態設為最大化。
         /// </summary>
@@ -458,7 +504,15 @@ namespace Automatic_Storage
         /// <param name="e">事件參數。</param>
         private void Input_Shown(object sender, EventArgs e)
         {
-            this.WindowState = FormWindowState.Maximized;
+                // 延遲在下一個 message loop 週期設定最大化，以避免與其他 Show/WindowState 呼叫產生 race condition
+                try
+                {
+                    this.BeginInvoke((Action)(() =>
+                    {
+                        try { this.WindowState = FormWindowState.Maximized; } catch { }
+                    }));
+                }
+                catch { }
         }
 
         /// <summary>
@@ -477,24 +531,6 @@ namespace Automatic_Storage
 
             // 依比例調整所有控制項
             SetControls(fgX, fgY, this);
-        }
-
-        /// <summary>
-        /// 處理 txt_Amount_U 欄位文字變更事件。
-        /// 當使用者修改 txt_Amount_U 內容時，計算包裝數量與單位數量的乘積，並顯示於 txt_Amount 欄位。
-        /// </summary>
-        /// <param name="sender">事件來源物件，通常為 txt_Amount_U。</param>
-        /// <param name="e">事件參數。</param>
-        private void txt_Amount_U_TextChanged(object sender, EventArgs e)
-        {
-            //string nS1 = (string.IsNullOrEmpty(txtbox1.Text)) ? "0" : txtbox1.Text;
-            //string nS2 = (string.IsNullOrEmpty(txt_Amount_U.Text)) ? "0" : txt_Amount_U.Text;
-
-            //Double nI1 = Convert.ToDouble(nS1);
-            //Double nI2 = Convert.ToDouble(nS2);
-
-            //Double result = nI1 * nI2;
-            //txt_Amount.Text = result.ToString();
         }
 
         /// <summary>
@@ -525,17 +561,26 @@ namespace Automatic_Storage
             Label[] lbl = new Label[18] { lab_p1, lab_p2, lab_p3, lab_p4, lab_p5, lab_p6, lab_p7, lab_p8, lab_p9, lab_p10,
                                             lab_p11,lab_p12,lab_p13,lab_p14,lab_p15,lab_p16,lab_p17,lab_p18};
 
-            // 檢查昶亨料號是否有輸入
-            if (!string.IsNullOrEmpty(txt_Item1.Text.Trim()))
+            // 檢查昶亨料號是否有輸入並防呆（避免字串長度不足導致 IndexOutOfRange）
+            try
             {
-                // 取得料號倒數第4碼判斷是否為 CMC
-                string auditCMC = txt_Item1.Text[txt_Item1.Text.Length - 4].ToString().ToUpper();
-
-                // 若倒數第4碼為 A，顯示 CMC 標籤
-                if (auditCMC == "A")
+                var text = txt_Item1.Text?.Trim();
+                if (!string.IsNullOrEmpty(text) && (text?.Length ?? 0) >= 4)
                 {
-                    labCMC.Visible = true;
+                    // 取得料號倒數第4碼判斷是否為 CMC
+                    string auditCMC = text![(text!.Length - 4)].ToString().ToUpper();
+                    // 若倒數第4碼為 A，顯示 CMC 標籤
+                    labCMC.Visible = (auditCMC == "A");
                 }
+                else
+                {
+                    labCMC.Visible = false;
+                }
+            }
+            catch (Exception ex)
+            {
+                LogException(ex, "txt_Item1_Leave - auditCMC");
+                try { MessageBox.Show("料號檢查發生錯誤，請聯絡系統管理員。"); } catch { }
             }
 
             // 若昶亨料號與客戶料號皆未輸入，顯示提示訊息
@@ -550,7 +595,7 @@ namespace Automatic_Storage
                 {
                     sqlitem = "select item_E,item_C,Spec from Automatic_Storage_Spec where item_E = @item";
                     sqlpositionList = "select Position from Automatic_Storage_Detail where Item_No_Master = @item and amount>0  group by Position";
-                    ItemChoice = txt_Item1.Text;
+                    ItemChoice = txt_Item1.Text ?? "";
                     msgcheck = "select * from Automatic_Storage_Msg where item_E =@item ";
                 }
                 // 若客戶料號有輸入
@@ -558,7 +603,7 @@ namespace Automatic_Storage
                 {
                     sqlitem = "select item_E,item_C,Spec from Automatic_Storage_Spec where item_C =@item";
                     sqlpositionList = "select Position from Automatic_Storage_Detail where Item_No_Slave = @item and amount>0  group by Position";
-                    ItemChoice = txt_item2.Text;
+                    ItemChoice = txt_item2.Text ?? "";
                     msgcheck = "select * from Automatic_Storage_Msg where item_C =@item ";
                 }
                 SqlParameter[] parm = new SqlParameter[]
@@ -616,53 +661,6 @@ namespace Automatic_Storage
                     }
 
                 }
-            }
-            //return;
-        }
-
-        private void txtbox1_Leave(object sender, EventArgs e)
-        {
-            //if (string.IsNullOrEmpty(txtbox1.Text))
-            //{
-            //    MessageBox.Show("包裝數量尚未輸入!");
-            // 將焦點移至儲位輸入框
-            //    txtbox1.Focus();
-            //}
-            //if (string.IsNullOrEmpty(txt_Amount_U.Text))
-            //{
-            //    MessageBox.Show("單位數量尚未輸入!");
-            //    txt_Amount_U.Focus();
-            //}
-
-        }
-
-        /// <summary>
-        /// 處理 txtbox1 的 KeyPress 事件，僅允許輸入數字與退格鍵。
-        /// </summary>
-        /// <param name="sender">事件來源物件，通常為 txtbox1。</param>
-        /// <param name="e">按鍵事件參數。</param>
-        private void txtbox1_KeyPress(object sender, KeyPressEventArgs e)
-        {
-            // 檢查是否輸入的不是數字且不是退格鍵
-            if (((int)e.KeyChar < 48 | (int)e.KeyChar > 57) & (int)e.KeyChar != 8)
-            {
-                // 若不是數字或退格鍵則不允許輸入
-                e.Handled = true;
-            }
-        }
-
-        /// <summary>
-        /// 處理所有元件的 KeyPress 事件，當按下 Enter 鍵時，會自動跳至下一個元件。
-        /// </summary>
-        /// <param name="sender">事件來源物件。</param>
-        /// <param name="e">按鍵事件參數。</param>
-        private void _KeyPress(object sender, KeyPressEventArgs e)
-        {
-            // 判斷是否按下 Enter 鍵
-            if (e.KeyChar == 13)
-            {
-                // 跳至下一個元件
-                this.SelectNextControl(this.ActiveControl, true, true, true, false); //跳下一個元件
             }
         }
 
