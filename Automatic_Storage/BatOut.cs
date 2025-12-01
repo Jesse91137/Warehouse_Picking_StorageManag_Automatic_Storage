@@ -1,4 +1,5 @@
-﻿using System; // 引用 System 命名空間
+﻿using Automatic_Storage.Utilities;
+using System; // 引用 System 命名空間
 using System.Collections.Generic; // 引用泛型集合
 using System.ComponentModel; // 引用元件模型
 using System.Data; // 引用資料處理
@@ -312,11 +313,18 @@ namespace Automatic_Storage // 命名空間：Automatic_Storage
                         var fileName = FileUpload1.FileName;
 
                         FileInfo _info = new FileInfo(fileName);
-                        string _new = Application.StartupPath + "\\Upload\\" + _info.Name;
+                        string uploadPath = UploadHelper.GetUploadFilePath(_info.Name);
                         if (File.Exists(fileName))
                         {
-                            _info.CopyTo(_new, true);
-                            txt_path.Text = _new;
+                            try
+                            {
+                                _info.CopyTo(uploadPath, true);
+                                txt_path.Text = uploadPath;
+                            }
+                            catch (Exception ex)
+                            {
+                                MessageBox.Show($"複製檔案失敗: {ex.Message}");
+                            }
                         }
                         //dataBind();
                     }
@@ -704,8 +712,7 @@ namespace Automatic_Storage // 命名空間：Automatic_Storage
                 //檔案
                 Excel.Workbook excel_wb = excel_app.Workbooks.Add();
                 //工作表
-                Excel.Worksheet excel_ws = new Excel.Worksheet();
-                excel_ws = excel_wb.Worksheets[1];
+                Excel.Worksheet excel_ws = (Excel.Worksheet)excel_wb.Worksheets[1];
                 excel_ws.Name = "Sheet1";
                 int x = (btn_sender == "1") ? 10 : 6; //(OLD)
                 //int x = (btn_sender=="1")?18:6; //(NEW)
@@ -742,12 +749,17 @@ namespace Automatic_Storage // 命名空間：Automatic_Storage
                 }
 
                 //存檔
+                // 提前宣告在 try 內會被建立的 COM 物件，讓外層可用於最後釋放
+                Excel.Range colRange = null;
+                Excel.Worksheet recordWs = null;
+                Excel.Worksheet mainWs = null;
+
                 // 在儲存前，確保工作表保護與應領數量欄位被標記為 Locked
                 try
                 {
                     string protectPassword = "1234";
                     // 確保主工作表存在
-                    Excel.Worksheet mainWs = excel_wb.Worksheets[1];
+                    mainWs = (Excel.Worksheet)excel_wb.Worksheets[1];
                     // 找到應領數量欄位的索引（比對標題）
                     int amountColIndex = -1;
                     int colCount = mainWs.UsedRange.Columns.Count;
@@ -764,12 +776,12 @@ namespace Automatic_Storage // 命名空間：Automatic_Storage
                     // 將該欄標為 Locked（若找得到）
                     if (amountColIndex > 0)
                     {
-                        Excel.Range colRange = mainWs.Columns[amountColIndex];
+                        colRange = (Excel.Range)mainWs.Columns[amountColIndex];
                         colRange.Locked = true;
                     }
 
                     // 確保 '記錄' 工作表存在；若不存在則建立並放在第二個位置
-                    Excel.Worksheet recordWs = null;
+                    // recordWs 已在外層宣告，這裡直接使用
                     bool foundRecord = false;
                     for (int i = 1; i <= excel_wb.Worksheets.Count; i++)
                     {
@@ -783,7 +795,7 @@ namespace Automatic_Storage // 命名空間：Automatic_Storage
                     }
                     if (!foundRecord)
                     {
-                        recordWs = excel_wb.Worksheets.Add(Type.Missing, excel_wb.Worksheets[1], Type.Missing, Type.Missing) as Excel.Worksheet;
+                        try { recordWs = excel_wb.Worksheets.Add(After: excel_wb.Worksheets[1]) as Excel.Worksheet; } catch { recordWs = excel_wb.Worksheets.Add(Type.Missing, excel_wb.Worksheets[1], Type.Missing, Type.Missing) as Excel.Worksheet; }
                         recordWs.Name = "記錄";
                     }
 
@@ -803,14 +815,21 @@ namespace Automatic_Storage // 命名空間：Automatic_Storage
                 }
                 catch { }
 
+                // 釋放在此區段建立的暫時 COM 物件，避免殘留
+                try { if (colRange != null) Automatic_Storage.Utilities.ComInterop.ReleaseComObjectSafe(colRange); } catch { }
+                try { if (recordWs != null) Automatic_Storage.Utilities.ComInterop.ReleaseComObjectSafe(recordWs); } catch { }
+                try { if (mainWs != null) Automatic_Storage.Utilities.ComInterop.ReleaseComObjectSafe(mainWs); } catch { }
+
                 excel_wb.SaveAs(filePath, Excel.XlFileFormat.xlExcel8);
 
                 //關閉book
                 excel_wb.Close(false, Type.Missing, Type.Missing);
                 //關閉excel
                 excel_app.Quit();
-                //關閉&釋放
-                System.Runtime.InteropServices.Marshal.ReleaseComObject(excel_app);
+                //關閉&釋放：先釋放 workbook/worksheet，再釋放 application
+                try { if (excel_wb != null) Automatic_Storage.Utilities.ComInterop.ReleaseComObjectSafe(excel_wb); } catch { }
+                try { if (excel_ws != null) Automatic_Storage.Utilities.ComInterop.ReleaseComObjectSafe(excel_ws); } catch { }
+                try { Automatic_Storage.Utilities.ComInterop.ReleaseComObjectSafe(excel_app); } catch { }
                 excel_ws = null;
                 excel_wb = null;
                 excel_app = null;
@@ -1354,8 +1373,12 @@ namespace Automatic_Storage // 命名空間：Automatic_Storage
             }
             catch (Exception ex)
             {
-                // Log the error or display an error message to the user
-                Console.WriteLine("Error: " + ex.Message);
+                // 使用集中式 Logger 非同步寫入錯誤，避免直接輸出到 Console
+                try
+                {
+                    _ = System.Threading.Tasks.Task.Run(() => Automatic_Storage.Utilities.Logger.LogErrorAsync("BatOut Error: " + ex.Message));
+                }
+                catch { }
             }
         }
 
