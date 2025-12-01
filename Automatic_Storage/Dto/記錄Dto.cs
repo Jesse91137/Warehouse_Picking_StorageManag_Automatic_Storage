@@ -21,7 +21,7 @@ namespace Automatic_Storage.Dto
         /// <value>
         /// The 料號.
         /// </value>
-        public string 料號 { get; set; }
+        public string 料號 { get; set; } = string.Empty;
 
         /// <summary>
         /// Gets or sets the 實際刷入的數量。
@@ -37,6 +37,6 @@ namespace Automatic_Storage.Dto
         /// <value>
         /// The 操作者.
         /// </value>
-        public string 操作者 { get; set; }
+        public string 操作者 { get; set; } = string.Empty;
     }
 }
