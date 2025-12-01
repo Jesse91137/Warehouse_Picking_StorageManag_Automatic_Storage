@@ -32,6 +32,14 @@
     <LangVersion>latest</LangVersion>
     <!-- 啟用 nullable reference types：專案將採用嚴格的 nullability 檢查，之後會逐一修正警告/必要錯誤 -->
     <Nullable>enable</Nullable>
+    <!--
+      保守性地全域封鎖部分由 WinForms Designer 或歷史程式碼產生的噪音編譯警告。
+      - CS0414: 欄位已賦值但未使用（常見於 UI flag/counters）
+      - CS0169: 私有欄位未被使用（Designer or reflection 可能會使用）
+      - CS0649: 欄位未被指派（Designer 會在執行階段初始化）
+      如需更嚴格逐一修正，之後可移除此設定並分批處理警告。
+    -->
+    <NoWarn>0414;0169;0649</NoWarn>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
     <PlatformTarget>AnyCPU</PlatformTarget>
@@ -73,6 +81,26 @@
   </PropertyGroup>
   <PropertyGroup>
     <SignManifests>false</SignManifests>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x86'">
+    <DebugSymbols>true</DebugSymbols>
+    <OutputPath>bin\x86\Debug\</OutputPath>
+    <DefineConstants>DEBUG;TRACE</DefineConstants>
+    <NoWarn>0414;0169;0649</NoWarn>
+    <DebugType>full</DebugType>
+    <PlatformTarget>x86</PlatformTarget>
+    <LangVersion>latest</LangVersion>
+    <ErrorReport>prompt</ErrorReport>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x86'">
+    <OutputPath>bin\x86\Release\</OutputPath>
+    <DefineConstants>TRACE</DefineConstants>
+    <Optimize>true</Optimize>
+    <NoWarn>0414;0169;0649</NoWarn>
+    <DebugType>pdbonly</DebugType>
+    <PlatformTarget>x86</PlatformTarget>
+    <LangVersion>latest</LangVersion>
+    <ErrorReport>prompt</ErrorReport>
   </PropertyGroup>
   <ItemGroup>
     <Reference Include="System.Resources.Extensions, Version=6.0.0.0, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51">
@@ -147,6 +175,7 @@
     <Compile Include="CMC_DC.cs" />
     <Compile Include="db.cs" />
     <Compile Include="DelEngsr.cs" />
+    <Compile Include="Dto\MyItemDto.cs" />
     <Compile Include="Dto\SaveResultDto.cs" />
     <Compile Include="Dto\記錄Dto.cs" />
     <Compile Include="Form1.cs">
@@ -238,6 +267,7 @@
     <!-- 新增: 編譯包含集中化的 UiHelpers 類別以還原游標狀態 -->
     <Compile Include="Utilities\UiHelpers.cs" />
     <Compile Include="Utilities\DgvHelpers.cs" />
+    <Compile Include="Utilities\UploadHelper.cs" />
     <EmbeddedResource Include="ActualDate.resx">
       <DependentUpon>ActualDate.cs</DependentUpon>
     </EmbeddedResource>
