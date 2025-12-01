@@ -31,9 +31,9 @@ namespace Automatic_Storage
         {
             System.Windows.Forms.DataGridViewCellStyle dataGridViewCellStyle3 = new System.Windows.Forms.DataGridViewCellStyle();
             this.tabControl1 = new System.Windows.Forms.TabControl();
-            this.tabPage1 = new System.Windows.Forms.TabPage();
+            this.tabPage1 = new System.Windows.Forms.TabPage();// 儲位新增
             this.lab_finish = new System.Windows.Forms.Label();
-            this.btn_submit = new System.Windows.Forms.Button();
+            this.btn_submit = new System.Windows.Forms.Button();// 儲位新增-送出
             this.label2 = new System.Windows.Forms.Label();
             this.label4 = new System.Windows.Forms.Label();
             this.label12 = new System.Windows.Forms.Label();
@@ -44,12 +44,12 @@ namespace Automatic_Storage
             this.label18 = new System.Windows.Forms.Label();
             this.label19 = new System.Windows.Forms.Label();
             this.label20 = new System.Windows.Forms.Label();
-            this.txt_Position12 = new System.Windows.Forms.TextBox();
-            this.txt_Position11 = new System.Windows.Forms.TextBox();
-            this.txt_Position10 = new System.Windows.Forms.TextBox();
-            this.txt_Position9 = new System.Windows.Forms.TextBox();
-            this.txt_Position8 = new System.Windows.Forms.TextBox();
-            this.txt_Position7 = new System.Windows.Forms.TextBox();
+            this.txt_Position12 = new System.Windows.Forms.TextBox();// 儲位新增-輸入儲位新增12
+            this.txt_Position11 = new System.Windows.Forms.TextBox();// 儲位新增-輸入儲位新增11
+            this.txt_Position10 = new System.Windows.Forms.TextBox();// 儲位新增-輸入儲位新增10
+            this.txt_Position9 = new System.Windows.Forms.TextBox();// 儲位新增-輸入儲位新增9
+            this.txt_Position8 = new System.Windows.Forms.TextBox();// 儲位新增-輸入儲位新增8
+            this.txt_Position7 = new System.Windows.Forms.TextBox();// 儲位新增-輸入儲位新增7
             this.label13 = new System.Windows.Forms.Label();
             this.label11 = new System.Windows.Forms.Label();
             this.label3 = new System.Windows.Forms.Label();
@@ -60,12 +60,12 @@ namespace Automatic_Storage
             this.label8 = new System.Windows.Forms.Label();
             this.label5 = new System.Windows.Forms.Label();
             this.label1 = new System.Windows.Forms.Label();
-            this.txt_Position6 = new System.Windows.Forms.TextBox();
-            this.txt_Position5 = new System.Windows.Forms.TextBox();
-            this.txt_Position4 = new System.Windows.Forms.TextBox();
-            this.txt_Position3 = new System.Windows.Forms.TextBox();
-            this.txt_Position2 = new System.Windows.Forms.TextBox();
-            this.txt_Position1 = new System.Windows.Forms.TextBox();
+            this.txt_Position6 = new System.Windows.Forms.TextBox();// 儲位新增-輸入儲位新增6
+            this.txt_Position5 = new System.Windows.Forms.TextBox();// 儲位新增-輸入儲位新增5
+            this.txt_Position4 = new System.Windows.Forms.TextBox();// 儲位新增-輸入儲位新增4
+            this.txt_Position3 = new System.Windows.Forms.TextBox();// 儲位新增-輸入儲位新增3
+            this.txt_Position2 = new System.Windows.Forms.TextBox();// 儲位新增-輸入儲位新增2
+            this.txt_Position1 = new System.Windows.Forms.TextBox();// 儲位新增-輸入儲位新增1
             this.tabPage3 = new System.Windows.Forms.TabPage();
             this.button3 = new System.Windows.Forms.Button();
             this.txt_new_p = new System.Windows.Forms.TextBox();
@@ -146,7 +146,7 @@ namespace Automatic_Storage
             this.del_Col = new System.Windows.Forms.DataGridViewButtonColumn();
             this.btn_update = new System.Windows.Forms.Button();
             this.tabControl1.SuspendLayout();
-            this.tabPage1.SuspendLayout();
+            this.tabPage1.SuspendLayout(); // 儲位新增
             this.tabPage3.SuspendLayout();
             ((System.ComponentModel.ISupportInitialize)(this.dataGridView2)).BeginInit();
             this.tabPage4.SuspendLayout();
@@ -165,8 +165,8 @@ namespace Automatic_Storage
             // 
             // tabControl1
             // 
-            this.tabControl1.Controls.Add(this.tabPage1);
-            this.tabControl1.Controls.Add(this.tabPage3);
+            this.tabControl1.Controls.Add(this.tabPage1);// 儲位新增
+            this.tabControl1.Controls.Add(this.tabPage3);// 儲位清單
             this.tabControl1.Controls.Add(this.tabPage4);
             this.tabControl1.Controls.Add(this.tabPage5);
             this.tabControl1.Controls.Add(this.tabPage2);
@@ -178,10 +178,10 @@ namespace Automatic_Storage
             this.tabControl1.TabIndex = 0;
             this.tabControl1.SelectedIndexChanged += new System.EventHandler(this.tabControl1_SelectedIndexChanged);
             // 
-            // tabPage1
+            // tabPage1 儲位新增
             // 
             this.tabPage1.Controls.Add(this.lab_finish);
-            this.tabPage1.Controls.Add(this.btn_submit);
+            this.tabPage1.Controls.Add(this.btn_submit);// 送出
             this.tabPage1.Controls.Add(this.label2);
             this.tabPage1.Controls.Add(this.label4);
             this.tabPage1.Controls.Add(this.label12);
@@ -232,7 +232,7 @@ namespace Automatic_Storage
             this.lab_finish.Size = new System.Drawing.Size(0, 27);
             this.lab_finish.TabIndex = 139;
             // 
-            // btn_submit
+            // btn_submit 儲位新增-送出
             // 
             this.btn_submit.Font = new System.Drawing.Font("微軟正黑體", 18F, System.Drawing.FontStyle.Bold);
             this.btn_submit.Location = new System.Drawing.Point(560, 376);
@@ -564,7 +564,7 @@ namespace Automatic_Storage
             this.txt_Position1.TextChanged += new System.EventHandler(this.txt_Position1_TextChanged);
             this.txt_Position1.KeyPress += new System.Windows.Forms.KeyPressEventHandler(this.txt_Position1_KeyPress);
             // 
-            // tabPage3
+            // tabPage3--儲位清單
             // 
             this.tabPage3.Controls.Add(this.button3);
             this.tabPage3.Controls.Add(this.txt_new_p);
@@ -579,7 +579,7 @@ namespace Automatic_Storage
             this.tabPage3.Text = "儲位清單";
             this.tabPage3.UseVisualStyleBackColor = true;
             // 
-            // button3
+            // button3--儲位清單--更新
             // 
             this.button3.Font = new System.Drawing.Font("微軟正黑體", 18F, System.Drawing.FontStyle.Bold);
             this.button3.Location = new System.Drawing.Point(580, 22);
@@ -590,7 +590,7 @@ namespace Automatic_Storage
             this.button3.UseVisualStyleBackColor = true;
             this.button3.Click += new System.EventHandler(this.button3_Click);
             // 
-            // txt_new_p
+            // txt_new_p--儲位清單
             // 
             this.txt_new_p.Font = new System.Drawing.Font("微軟正黑體", 12F, System.Drawing.FontStyle.Bold);
             this.txt_new_p.Location = new System.Drawing.Point(450, 26);
@@ -598,7 +598,7 @@ namespace Automatic_Storage
             this.txt_new_p.Size = new System.Drawing.Size(100, 29);
             this.txt_new_p.TabIndex = 4;
             // 
-            // label24
+            // label24--儲位清單
             // 
             this.label24.AutoSize = true;
             this.label24.Font = new System.Drawing.Font("微軟正黑體", 14.25F);
@@ -618,7 +618,7 @@ namespace Automatic_Storage
             this.label23.TabIndex = 3;
             this.label23.Text = "儲位";
             // 
-            // txt_position_s
+            // txt_position_s--儲位清單-查詢條件-儲位
             // 
             this.txt_position_s.Font = new System.Drawing.Font("微軟正黑體", 12F, System.Drawing.FontStyle.Bold);
             this.txt_position_s.Location = new System.Drawing.Point(114, 26);
@@ -627,7 +627,7 @@ namespace Automatic_Storage
             this.txt_position_s.TabIndex = 2;
             this.txt_position_s.KeyPress += new System.Windows.Forms.KeyPressEventHandler(this.txt_position_s_KeyPress);
             // 
-            // dataGridView2
+            // dataGridView2--儲位清單-查詢結果
             // 
             this.dataGridView2.AllowUserToAddRows = false;
             this.dataGridView2.AutoSizeColumnsMode = System.Windows.Forms.DataGridViewAutoSizeColumnsMode.DisplayedCells;
@@ -1459,7 +1459,7 @@ namespace Automatic_Storage
         private System.Windows.Forms.TextBox txt_name;
         private System.Windows.Forms.Button button2;
         private System.Windows.Forms.Button btn_user_add;
-        private System.Windows.Forms.Button btn_submit;
+        private System.Windows.Forms.Button btn_submit; //儲位新增-送出
         private System.Windows.Forms.TabPage tabPage3;
         private System.Windows.Forms.Label label23;
         private System.Windows.Forms.TextBox txt_position_s;
