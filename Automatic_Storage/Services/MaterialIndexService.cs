@@ -1,4 +1,5 @@
 using System;
+using System.Data;
 using System.Collections.Generic;
 using System.Linq;
 using System.Windows.Forms;
@@ -16,7 +17,7 @@ namespace Automatic_Storage.Services
         /// <summary>
         /// 來源 DataGridView 物件，作為資料來源。
         /// </summary>
-        private readonly DataGridView _dgv;
+        private readonly DataGridView? _dgv;
 
         /// <summary>
         /// 以料號為鍵，儲存對應的 DataGridViewRow 列集合。
@@ -43,9 +44,71 @@ namespace Automatic_Storage.Services
         /// </summary>
         /// <param name="dgv">資料來源的 DataGridView。</param>
         /// <exception cref="ArgumentNullException">若傳入的 dgv 為 null 則拋出例外。</exception>
-        public MaterialIndexService(DataGridView dgv)
+        public MaterialIndexService(DataGridView? dgv = null)
         {
-            _dgv = dgv ?? throw new ArgumentNullException(nameof(dgv));
+            _dgv = dgv; // allow null for DataTable-based builds
+        }
+
+        /// <summary>
+        /// 建立內部索引與已發數量快取（從提供的 DataTable 建立），支援背景執行緒操作。
+        /// </summary>
+        /// <param name="dt">來源 DataTable</param>
+        public void BuildIndexFromDataTable(DataTable dt)
+        {
+            _materialIndex.Clear();
+            _materialShippedSums.Clear();
+            if (dt == null || dt.Rows == null || dt.Columns == null || dt.Columns.Count == 0) return;
+
+            int materialCol = -1;
+            int shippedCol = -1;
+            // Find columns by header names (reuse logic similar to FindColumnIndexByNames)
+            for (int i = 0; i < dt.Columns.Count; i++)
+            {
+                var name = dt.Columns[i].ColumnName ?? string.Empty;
+                var norm = TextParsing.SanitizeHeaderForMatch(name);
+                if (materialCol < 0 && (norm.Contains("昶亨料號") || norm.Contains("客戶料號"))) materialCol = i;
+                if (shippedCol < 0 && (norm.Contains("實發數量") || norm.Contains("發料數量"))) shippedCol = i;
+            }
+            if (materialCol < 0) return;
+
+            foreach (DataRow row in dt.Rows)
+            {
+                try
+                {
+                    if (row == null) continue;
+                    var raw = row[materialCol];
+                    var val = raw?.ToString()?.Trim();
+                    if (string.IsNullOrEmpty(val)) continue;
+                    var key = val;
+                    if (!_materialIndex.TryGetValue(key, out var list))
+                    {
+                        list = new List<DataGridViewRow>(4);
+                        _materialIndex[key] = list;
+                    }
+                    // We cannot store DataGridViewRow when building from DataTable, store empty list placeholder
+                }
+                catch { }
+            }
+
+            // Build shipped sums
+            if (shippedCol >= 0)
+            {
+                foreach (DataRow row in dt.Rows)
+                {
+                    try
+                    {
+                        var rawMat = row[materialCol]?.ToString()?.Trim();
+                        if (string.IsNullOrEmpty(rawMat)) continue;
+                        var key = TextParsing.NormalizeMaterialKey(rawMat);
+                        if (string.IsNullOrEmpty(key)) continue;
+                        decimal v = 0m;
+                        var sv = row[shippedCol]?.ToString() ?? string.Empty;
+                        if (TextParsing.TryParseDecimalValue(sv, out decimal parsed)) v = parsed;
+                        if (_materialShippedSums.TryGetValue(key, out decimal exist)) _materialShippedSums[key] = exist + v; else _materialShippedSums[key] = v;
+                    }
+                    catch { }
+                }
+            }
         }
 
         /// <summary>
