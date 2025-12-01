@@ -1,4 +1,5 @@
 using System;
+using System.Threading.Tasks;
 using System.Data;
 using System.IO;
 using System.Linq;
@@ -27,6 +28,35 @@ namespace Automatic_Storage.Utilities
         /// 呼叫端（例如 Form）可在啟動時覆寫此值。
         /// </summary>
         public static string excelPassword = "1234";
+
+        /// <summary>
+        /// Returns a readable path (original or temp copy) for NPOI access.
+        /// If the original file is locked, it copies it to a temp file and returns that path (tempPath ref filled).
+        /// </summary>
+        private static string ResolvePathOrTempCopy(string path, ref string tempPath)
+        {
+            tempPath = null;
+            if (string.IsNullOrWhiteSpace(path)) return path;
+            try
+            {
+                using (var fs = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)) { }
+                return path;
+            }
+            catch (IOException)
+            {
+                try
+                {
+                    tempPath = Path.Combine(Path.GetTempPath(), Path.GetFileNameWithoutExtension(path) + "_tmp" + Path.GetExtension(path));
+                    File.Copy(path, tempPath, true);
+                    return tempPath;
+                }
+                catch
+                {
+                    // if temp copy fails, let caller handle by throwing or fallback
+                    throw;
+                }
+            }
+        }
 
         /// <summary>
         /// 批次將記錄寫入 Excel 的「記錄」工作表。
@@ -61,15 +91,22 @@ namespace Automatic_Storage.Utilities
                     try { headerRange.HorizontalAlignment = Excel.XlHAlign.xlHAlignCenter; } catch { }
                     try { headerRange.VerticalAlignment = Excel.XlVAlign.xlVAlignCenter; } catch { }
                     try { headerRange.Font.Bold = true; } catch { }
-                    try { recordSheet.Columns[1].HorizontalAlignment = Excel.XlHAlign.xlHAlignLeft; } catch { }
-                    try { recordSheet.Columns[2].HorizontalAlignment = Excel.XlHAlign.xlHAlignLeft; } catch { }
-                    try { recordSheet.Columns[3].HorizontalAlignment = Excel.XlHAlign.xlHAlignRight; } catch { }
-                    try { recordSheet.Columns[4].HorizontalAlignment = Excel.XlHAlign.xlHAlignRight; } catch { }
+                    try { var __col1 = recordSheet.Columns[1] as Excel.Range; if (__col1 != null) __col1.HorizontalAlignment = Excel.XlHAlign.xlHAlignLeft; try { ReleaseComObjectSafe(__col1); } catch { } } catch { }
+                    try { var __col2 = recordSheet.Columns[2] as Excel.Range; if (__col2 != null) __col2.HorizontalAlignment = Excel.XlHAlign.xlHAlignLeft; try { ReleaseComObjectSafe(__col2); } catch { } } catch { }
+                    try { var __col3 = recordSheet.Columns[3] as Excel.Range; if (__col3 != null) __col3.HorizontalAlignment = Excel.XlHAlign.xlHAlignRight; try { ReleaseComObjectSafe(__col3); } catch { } } catch { }
+                    try { var __col4 = recordSheet.Columns[4] as Excel.Range; if (__col4 != null) __col4.HorizontalAlignment = Excel.XlHAlign.xlHAlignRight; try { ReleaseComObjectSafe(__col4); } catch { } } catch { }
                     try { recordSheet.AutoFilterMode = false; } catch { }
-                    try { recordSheet.Columns[1].AutoFit(); recordSheet.Columns[2].AutoFit(); recordSheet.Columns[3].AutoFit(); recordSheet.Columns[4].AutoFit(); } catch { }
+                    try
+                    {
+                        var _c1 = recordSheet.Columns[1] as Excel.Range; if (_c1 != null) { try { _c1.AutoFit(); } catch { } try { ReleaseComObjectSafe(_c1); } catch { } }
+                        var _c2 = recordSheet.Columns[2] as Excel.Range; if (_c2 != null) { try { _c2.AutoFit(); } catch { } try { ReleaseComObjectSafe(_c2); } catch { } }
+                        var _c3 = recordSheet.Columns[3] as Excel.Range; if (_c3 != null) { try { _c3.AutoFit(); } catch { } try { ReleaseComObjectSafe(_c3); } catch { } }
+                        var _c4 = recordSheet.Columns[4] as Excel.Range; if (_c4 != null) { try { _c4.AutoFit(); } catch { } try { ReleaseComObjectSafe(_c4); } catch { } }
+                    }
+                    catch { }
                 }
                 // 若工作表受到保護，先嘗試解除保護以便設定格式與寫入。解除保護應先於 NumberFormat 設定。
-                    try { if (!string.IsNullOrEmpty(password)) recordSheet.Unprotect(password); } catch { try { recordSheet.Unprotect(excelPassword); } catch { } }
+                try { if (!string.IsNullOrEmpty(password)) recordSheet.Unprotect(password); } catch { try { recordSheet.Unprotect(excelPassword); } catch { } }
                 // 強制將操作者欄整欄設定為文字格式，並在後續每次寫入時再次確保該儲存格為文字
                 try { (recordSheet.Columns[4] as Excel.Range).NumberFormat = "@"; } catch { }
                 var recUsed = recordSheet.UsedRange;
@@ -117,6 +154,7 @@ namespace Automatic_Storage.Utilities
                                     {
                                         try { opCell.NumberFormat = "@"; } catch { }
                                         try { opCell.Value2 = batch[i, 3]; } catch { }
+                                        try { ReleaseComObjectSafe(opCell); } catch { }
                                     }
                                 }
                             }
@@ -140,6 +178,7 @@ namespace Automatic_Storage.Utilities
                                     {
                                         try { opCell.NumberFormat = "@"; } catch { }
                                         try { opCell.Value2 = "'" + (batch[i, 3]?.ToString() ?? string.Empty); } catch { }
+                                        try { ReleaseComObjectSafe(opCell); } catch { }
                                     }
                                     else
                                     {
@@ -149,6 +188,13 @@ namespace Automatic_Storage.Utilities
                                 catch { }
                             }
                             result.AddRange(records);
+                        }
+                        finally
+                        {
+                            try { if (writeRange != null) ReleaseComObjectSafe(writeRange); } catch { }
+                            try { if (rStart != null) ReleaseComObjectSafe(rStart); } catch { }
+                            try { if (rEnd != null) ReleaseComObjectSafe(rEnd); } catch { }
+                            try { if (recUsed != null) ReleaseComObjectSafe(recUsed); } catch { }
                         }
                     }
                     else
@@ -167,6 +213,7 @@ namespace Automatic_Storage.Utilities
                                 {
                                     try { opCell.NumberFormat = "@"; } catch { }
                                     try { opCell.Value2 = "'" + (batch[i, 3]?.ToString() ?? string.Empty); } catch { }
+                                    try { ReleaseComObjectSafe(opCell); } catch { }
                                 }
                                 else
                                 {
@@ -202,6 +249,7 @@ namespace Automatic_Storage.Utilities
                                     {
                                         try { opCell.NumberFormat = "@"; } catch { }
                                         try { opCell.Value2 = "'" + (rowArr[0, 3]?.ToString() ?? string.Empty); } catch { }
+                                        try { ReleaseComObjectSafe(opCell); } catch { }
                                     }
                                     else
                                     {
@@ -216,12 +264,22 @@ namespace Automatic_Storage.Utilities
                     }
                     catch { }
                 }
-                try { recordSheet.Columns[1].AutoFit(); recordSheet.Columns[2].AutoFit(); recordSheet.Columns[3].AutoFit(); recordSheet.Columns[4].AutoFit(); } catch { }
+                try
+                {
+                    var _c1 = recordSheet.Columns[1] as Excel.Range; if (_c1 != null) _c1.AutoFit();
+                    var _c2 = recordSheet.Columns[2] as Excel.Range; if (_c2 != null) _c2.AutoFit();
+                    var _c3 = recordSheet.Columns[3] as Excel.Range; if (_c3 != null) _c3.AutoFit();
+                    var _c4 = recordSheet.Columns[4] as Excel.Range; if (_c4 != null) _c4.AutoFit();
+                }
+                catch { }
                 // 保護工作表（解除保護後已寫入並設定格式）
                 try { recordSheet.Cells.Locked = true; } catch { }
-                try { if (!string.IsNullOrEmpty(password)) recordSheet.Protect(password, Type.Missing, Type.Missing, Type.Missing, Type.Missing, Type.Missing, Type.Missing, Type.Missing, Type.Missing, Type.Missing, Type.Missing, Type.Missing, Type.Missing, Type.Missing, false, Type.Missing);
+                try
+                {
+                    if (!string.IsNullOrEmpty(password)) recordSheet.Protect(password, Type.Missing, Type.Missing, Type.Missing, Type.Missing, Type.Missing, Type.Missing, Type.Missing, Type.Missing, Type.Missing, Type.Missing, Type.Missing, Type.Missing, Type.Missing, false, Type.Missing);
                     else recordSheet.Protect(excelPassword, Type.Missing, Type.Missing, Type.Missing, Type.Missing, Type.Missing, Type.Missing, Type.Missing, Type.Missing, Type.Missing, Type.Missing, Type.Missing, Type.Missing, Type.Missing, false, Type.Missing);
-                } catch { }
+                }
+                catch { }
                 wb.Save();
             }
             finally
@@ -256,9 +314,143 @@ namespace Automatic_Storage.Utilities
             Excel.Worksheet sheet = null;
             Excel.Range usedRange = null;
             DataTable table = new DataTable();
+            // Timing instrumentation for header scan/read/write phases
+            var swScan = System.Diagnostics.Stopwatch.StartNew();
+            swScan.Reset();
 
             try
             {
+                // Use ResolvePathOrTempCopy helper to get a readonly path that may be a temp copy
+                string? tmpCopyPath = null;
+                string fileToOpen = ResolvePathOrTempCopy(path, ref tmpCopyPath);
+                var ext = Path.GetExtension(path)?.ToLowerInvariant() ?? string.Empty;
+                bool preferNpoiForXlsm = false;
+                try { preferNpoiForXlsm = (ConfigurationManager.AppSettings["PreferNpoiForXlsm"] ?? "").ToString().ToLowerInvariant() == "true"; } catch { preferNpoiForXlsm = false; }
+                // NPOI fast path for .xlsx/.xls and optionally .xlsm
+                if (ext == ".xlsx" || ext == ".xls" || (ext == ".xlsm" && preferNpoiForXlsm))
+                {
+                    try
+                    {
+                        var swNpoi = System.Diagnostics.Stopwatch.StartNew();
+                        var tableN = new DataTable();
+                        Stream fs = null;
+                        try
+                        {
+                            fs = new FileStream(fileToOpen, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                            if (fs == null) throw new IOException("Failed to open file for NPOI read");
+                            IWorkbook wbN = ext == ".xls" ? (IWorkbook)new HSSFWorkbook(fs) : new XSSFWorkbook(fs);
+                            if (wbN == null || wbN.NumberOfSheets <= 0) return null;
+                            ISheet npoiSheet = wbN.GetSheetAt(0);
+                            if (npoiSheet == null) return null;
+                            // Determine header row
+                            int headerRowIdx = -1; int bestCount = -1; int scanLimit = Math.Min(10, npoiSheet.LastRowNum + 1);
+                            try
+                            {
+                                if (npoiSheet.LastRowNum >= 2)
+                                {
+                                    var pref = npoiSheet.GetRow(2);
+                                    if (pref != null)
+                                    {
+                                        int cnt = 0;
+                                        int first = pref.FirstCellNum >= 0 ? pref.FirstCellNum : 0;
+                                        int last = pref.LastCellNum >= 0 ? pref.LastCellNum : first;
+                                        for (int c = first; c <= last; c++) { var cell = pref.GetCell(c); if (cell != null && !string.IsNullOrWhiteSpace(cell.ToString())) cnt++; }
+                                        if (cnt > 0) headerRowIdx = 2;
+                                    }
+                                }
+                            }
+                            catch { headerRowIdx = -1; }
+                            if (headerRowIdx < 0)
+                            {
+                                for (int r = 0; r < scanLimit; r++)
+                                {
+                                    var row = npoiSheet.GetRow(r);
+                                    if (row == null) continue;
+                                    int cnt = 0;
+                                    int first = row.FirstCellNum >= 0 ? row.FirstCellNum : 0;
+                                    int last = row.LastCellNum >= 0 ? row.LastCellNum : first;
+                                    for (int c = first; c <= last; c++) { var cell = row.GetCell(c); if (cell != null && !string.IsNullOrWhiteSpace(cell.ToString())) cnt++; }
+                                    if (cnt > bestCount) { bestCount = cnt; headerRowIdx = r; }
+                                }
+                            }
+                            if (headerRowIdx < 0) headerRowIdx = 0;
+                            swScan.Stop();
+
+                            var npoiHeaderRow = npoiSheet.GetRow(headerRowIdx);
+                            if (npoiHeaderRow == null) return null;
+                            int maxCol = npoiHeaderRow.LastCellNum >= 0 ? npoiHeaderRow.LastCellNum : 0;
+
+                            var npoiIncludedCols = new List<int>();
+                            var npoiHeaderNames = new List<string>();
+                            for (int c = 0; c < maxCol; c++)
+                            {
+                                bool isHidden = false;
+                                try
+                                {
+                                    // Use NPOI sheet methods (npoiSheet) rather than COM Worksheet
+                                    try { isHidden = npoiSheet.IsColumnHidden(c); } catch { isHidden = false; }
+                                }
+                                catch { isHidden = false; }
+
+                                if (!isHidden)
+                                {
+                                    try { isHidden = npoiSheet.GetColumnWidth(c) <= 1; } catch { }
+                                }
+
+                                if (isHidden) continue;
+
+                                try
+                                {
+                                    var cell = npoiHeaderRow.GetCell(c);
+                                    var hn = cell?.ToString()?.Trim();
+                                    var colName = !string.IsNullOrWhiteSpace(hn) ? hn! : ("Column" + c);
+                                    npoiHeaderNames.Add(colName);
+                                    npoiIncludedCols.Add(c);
+                                }
+                                catch { }
+                            }
+
+                            // Create columns in the DataTable for included columns (use unique names)
+                            for (int i = 0; i < npoiHeaderNames.Count; i++)
+                            {
+                                var colName = npoiHeaderNames[i];
+                                var unique = colName;
+                                int idx = 1;
+                                while (tableN.Columns.Contains(unique)) { unique = colName + "_" + idx; idx++; }
+                                tableN.Columns.Add(unique);
+                            }
+                            if (npoiIncludedCols.Count == 0) return tableN;
+                            for (int r = headerRowIdx + 1; r <= npoiSheet.LastRowNum; r++)
+                            {
+                                var row = npoiSheet.GetRow(r);
+                                if (row == null) continue;
+                                var dr = tableN.NewRow(); bool anyNonEmpty = false;
+                                for (int i = 0; i < npoiIncludedCols.Count; i++)
+                                {
+                                    int c = npoiIncludedCols[i];
+                                    var cell = row.GetCell(c);
+                                    var txt = cell?.ToString() ?? string.Empty;
+                                    dr[i] = string.IsNullOrWhiteSpace(txt) ? DBNull.Value : txt;
+                                    if (!string.IsNullOrWhiteSpace(txt)) anyNonEmpty = true;
+                                }
+                                if (anyNonEmpty) tableN.Rows.Add(dr);
+                            }
+                        }
+                        finally
+                        {
+                            try { fs?.Dispose(); } catch { }
+                            try { if (!string.IsNullOrEmpty(tmpCopyPath) && File.Exists(tmpCopyPath)) File.Delete(tmpCopyPath); } catch { }
+                        }
+                        swNpoi.Stop();
+                        /*匯入檔案花費時間*/
+                        //try { _ = Task.Run(() => Logger.LogInfoAsync($"LoadFirstWorksheetToDataTable (NPOI): elapsed={swNpoi.ElapsedMilliseconds}ms, rows={tableN.Rows.Count}, cols={tableN.Columns.Count}")); } catch { }
+                        return tableN;
+                    }
+                    catch (Exception ex)
+                    {
+                        try { _ = Task.Run(() => Logger.LogErrorAsync($"NPOI load failed for {path}: {ex.Message}")); } catch { }
+                    }
+                }
                 xlApp = new Excel.Application();
                 xlApp.Visible = false;
                 xlApp.DisplayAlerts = false;
@@ -335,6 +527,7 @@ namespace Automatic_Storage.Utilities
                         {
                             try { isHidden = (bool)colRange.Hidden; }
                             catch { isHidden = false; }
+                            try { ReleaseComObjectSafe(colRange); } catch { }
                         }
                     }
                     catch { isHidden = false; }
@@ -414,20 +607,27 @@ namespace Automatic_Storage.Utilities
                         try { if (headerRange != null) headerRange.Font.Bold = true; } catch { }
 
                         // 設定欄位內容對齊：時間靠左、料號靠左、數量靠右、操作者靠右
-                        try { recordSheet.Columns[1].HorizontalAlignment = Excel.XlHAlign.xlHAlignLeft; } catch { }
-                        try { recordSheet.Columns[2].HorizontalAlignment = Excel.XlHAlign.xlHAlignLeft; } catch { }
-                        try { recordSheet.Columns[3].HorizontalAlignment = Excel.XlHAlign.xlHAlignRight; } catch { }
-                        try { recordSheet.Columns[4].HorizontalAlignment = Excel.XlHAlign.xlHAlignRight; } catch { }
+                        try { var __col1b = recordSheet.Columns[1] as Excel.Range; if (__col1b != null) __col1b.HorizontalAlignment = Excel.XlHAlign.xlHAlignLeft; } catch { }
+                        try { var __col2b = recordSheet.Columns[2] as Excel.Range; if (__col2b != null) __col2b.HorizontalAlignment = Excel.XlHAlign.xlHAlignLeft; } catch { }
+                        try { var __col3b = recordSheet.Columns[3] as Excel.Range; if (__col3b != null) __col3b.HorizontalAlignment = Excel.XlHAlign.xlHAlignRight; } catch { }
+                        try { var __col4b = recordSheet.Columns[4] as Excel.Range; if (__col4b != null) __col4b.HorizontalAlignment = Excel.XlHAlign.xlHAlignRight; } catch { }
                         // 確保操作者欄為文字格式（防止前導 0 被移除）
                         try { (recordSheet.Columns[4] as Excel.Range).NumberFormat = "@"; } catch { }
 
                         // 記錄工作表不需要篩選：確保未啟用 AutoFilter
                         try { var sh = recordSheet as Excel.Worksheet; if (sh != null) { try { if (sh.FilterMode) { try { sh.ShowAllData(); } catch { } } } catch { } try { sh.AutoFilterMode = false; } catch { } } } catch { }
-                        try { recordSheet.Columns[1].AutoFit(); recordSheet.Columns[2].AutoFit(); recordSheet.Columns[3].AutoFit(); recordSheet.Columns[4].AutoFit(); } catch { }
+                        try
+                        {
+                            var _c1 = recordSheet.Columns[1] as Excel.Range; if (_c1 != null) _c1.AutoFit();
+                            var _c2 = recordSheet.Columns[2] as Excel.Range; if (_c2 != null) _c2.AutoFit();
+                            var _c3 = recordSheet.Columns[3] as Excel.Range; if (_c3 != null) _c3.AutoFit();
+                            var _c4 = recordSheet.Columns[4] as Excel.Range; if (_c4 != null) _c4.AutoFit();
+                        }
+                        catch { }
                     }
 
-                // 無論是否為新建立的 sheet，強制將操作者欄設定為文字格式
-                try { (recordSheet.Columns[4] as Excel.Range).NumberFormat = "@"; } catch { }
+                    // 無論是否為新建立的 sheet，強制將操作者欄設定為文字格式
+                    try { (recordSheet.Columns[4] as Excel.Range).NumberFormat = "@"; } catch { }
 
                     try { if (!string.IsNullOrEmpty(excelPassword)) recordSheet.Unprotect(excelPassword); } catch { }
                     try { recordSheet.Cells.Locked = true; } catch { }
@@ -437,7 +637,7 @@ namespace Automatic_Storage.Utilities
                 catch (Exception ex)
                 {
                     // Log and continue; protection failure should not break the read flow
-                    try { Logger.LogErrorAsync("Protecting record sheet failed: " + ex.Message).Wait(); } catch { }
+                    try { System.Threading.Tasks.Task.Run(() => Logger.LogErrorAsync("Protecting record sheet failed: " + ex.Message)); } catch { }
                 }
 
                 // All relevant rows have been added above (only included headered columns and rows
@@ -470,18 +670,67 @@ namespace Automatic_Storage.Utilities
         /// <param name="batchSize">每批最大筆數（目前未實作分批，僅保留參數）。</param>
         public static void LoadFirstWorksheetToDataTableStreaming(string path, Action<DataTable> batchCallback, int batchSize = 1000)
         {
+            // Simple streaming path using NPOI where available. This method is executed on a background thread by the caller to avoid UI blocking.
             if (string.IsNullOrEmpty(path) || !File.Exists(path)) return;
             try
             {
-                // Always use COM-based loading to ensure hidden columns are properly skipped
-                // NPOI fast path is deliberately disabled for this scenario
-                var full = LoadFirstWorksheetToDataTable(path);
-                if (full != null) batchCallback?.Invoke(full);
-                return;
+                var ext = Path.GetExtension(path)?.ToLowerInvariant() ?? string.Empty;
+                bool preferNpoiForXlsm = false;
+                try { preferNpoiForXlsm = (ConfigurationManager.AppSettings["PreferNpoiForXlsm"] ?? string.Empty).ToLowerInvariant() == "true"; } catch { preferNpoiForXlsm = false; }
+                if (ext == ".xlsx" || ext == ".xls" || (ext == ".xlsm" && preferNpoiForXlsm))
+                {
+                    // resolve path or create temp copy for streaming NPOI read
+                    string? tmpCopyPath = null;
+                    string fileToOpen = ResolvePathOrTempCopy(path, ref tmpCopyPath);
+                    Stream fs = null;
+                    try
+                    {
+                        fs = new FileStream(fileToOpen, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                        if (fs == null) throw new IOException("Failed to open file for NPOI streaming read");
+                        IWorkbook wbN = ext == ".xls" ? (IWorkbook)new HSSFWorkbook(fs) : new XSSFWorkbook(fs);
+                        if (wbN == null || wbN.NumberOfSheets <= 0) return;
+                        var sheet = wbN.GetSheetAt(0);
+                        if (sheet == null) return;
+                        int headerRowIdx = -1; int bestCount = -1; int scanLimit = Math.Min(10, sheet.LastRowNum + 1);
+                        try { if (sheet.LastRowNum >= 2) { var pref = sheet.GetRow(2); if (pref != null) { int cnt = 0; int first = pref.FirstCellNum >= 0 ? pref.FirstCellNum : 0; int last = pref.LastCellNum >= 0 ? pref.LastCellNum : first; for (int c = first; c <= last; c++) { var cell = pref.GetCell(c); if (cell != null && !string.IsNullOrWhiteSpace(cell.ToString())) cnt++; } if (cnt > 0) headerRowIdx = 2; } } } catch { headerRowIdx = -1; }
+                        if (headerRowIdx < 0)
+                        {
+                            for (int r = 0; r < scanLimit; r++) { var row = sheet.GetRow(r); if (row == null) continue; int cnt = 0; int first = row.FirstCellNum >= 0 ? row.FirstCellNum : 0; int last = row.LastCellNum >= 0 ? row.LastCellNum : first; for (int c = first; c <= last; c++) { var cell = row.GetCell(c); if (cell != null && !string.IsNullOrWhiteSpace(cell.ToString())) cnt++; } if (cnt > bestCount) { bestCount = cnt; headerRowIdx = r; } }
+                        }
+                        if (headerRowIdx < 0) headerRowIdx = 0;
+                        var headerRow = sheet.GetRow(headerRowIdx);
+                        if (headerRow == null) return;
+                        int maxCol = headerRow.LastCellNum >= 0 ? headerRow.LastCellNum : 0;
+                        var table = new DataTable(); var includedCols = new List<int>();
+                        for (int c = 0; c < maxCol; c++) { var cell = headerRow.GetCell(c); var rawName = cell?.ToString(); if (string.IsNullOrWhiteSpace(rawName)) continue; string colName = rawName.Trim(); string unique = colName; int idx = 1; while (table.Columns.Contains(unique)) { unique = colName + "_" + idx; idx++; } table.Columns.Add(unique); includedCols.Add(c); }
+                        if (includedCols.Count == 0) return;
+                        int total = sheet.LastRowNum;
+                        int idxRow = headerRowIdx + 1;
+                        while (idxRow <= total)
+                        {
+                            int to = Math.Min(idxRow + batchSize - 1, total);
+                            var batchTable = table.Clone();
+                            for (int r = idxRow; r <= to; r++)
+                            {
+                                var row = sheet.GetRow(r); if (row == null) continue;
+                                var dr = batchTable.NewRow(); bool any = false;
+                                for (int i = 0; i < includedCols.Count; i++) { int c = includedCols[i]; var cell = row.GetCell(c); var txt = cell?.ToString() ?? string.Empty; dr[i] = string.IsNullOrWhiteSpace(txt) ? DBNull.Value : txt; if (!string.IsNullOrWhiteSpace(txt)) any = true; }
+                                if (any) batchTable.Rows.Add(dr);
+                            }
+                            batchCallback?.Invoke(batchTable);
+                            idxRow = to + 1;
+                        }
+                        return;
+                    }
+                    finally
+                    {
+                        try { fs?.Dispose(); } catch { }
+                        try { if (!string.IsNullOrEmpty(tmpCopyPath) && File.Exists(tmpCopyPath)) File.Delete(tmpCopyPath); } catch { }
+                    }
+                }
             }
             catch
             {
-                // If COM loading also fails, silently return - error already handled in LoadFirstWorksheetToDataTable
                 try { var full = LoadFirstWorksheetToDataTable(path); if (full != null) batchCallback?.Invoke(full); } catch { }
             }
         }
@@ -497,6 +746,13 @@ namespace Automatic_Storage.Utilities
         public static List<string> RemoveHiddenColumnsFromDataTable(string excelPath, DataTable uiTable)
         {
             var resultHeaders = new List<string>();
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var swScan = System.Diagnostics.Stopwatch.StartNew();
+            swScan.Reset();
+            var swRead = System.Diagnostics.Stopwatch.StartNew();
+            swRead.Reset();
+            var swWrite = System.Diagnostics.Stopwatch.StartNew();
+            swWrite.Reset();
             try
             {
                 if (string.IsNullOrWhiteSpace(excelPath) || !File.Exists(excelPath)) return resultHeaders;
@@ -510,80 +766,94 @@ namespace Automatic_Storage.Utilities
                     var hiddenHeaders = new List<string>();
                     try
                     {
-                        using (var fs = File.OpenRead(excelPath))
+                        string? tmpCopyPath = null;
+                        string fileToOpen = ResolvePathOrTempCopy(excelPath, ref tmpCopyPath);
+                        try
                         {
-                            IWorkbook wbN = ext == ".xlsx" ? (IWorkbook)new XSSFWorkbook(fs) : new HSSFWorkbook(fs);
-                            if (wbN == null || wbN.NumberOfSheets <= 0) return resultHeaders;
-                            ISheet? sheet = null;
-                            try
+                            using (var fs = File.OpenRead(fileToOpen))
                             {
-                                for (int i = 0; i < wbN.NumberOfSheets; i++)
-                                {
-                                    var nm = wbN.GetSheetName(i) ?? string.Empty;
-                                    if (string.Equals(nm.Trim(), "總表", StringComparison.OrdinalIgnoreCase)) { sheet = wbN.GetSheetAt(i); break; }
-                                }
-                            }
-                            catch { sheet = null; }
-                            if (sheet == null) sheet = wbN.GetSheetAt(0);
-                            if (sheet == null) return resultHeaders;
-
-                            // detect header row (prefer 3rd row)
-                            int headerRowIdx = -1; int bestCount = -1; int scanLimit = Math.Min(10, sheet.LastRowNum + 1);
-                            try
-                            {
-                                if (sheet.LastRowNum >= 2)
-                                {
-                                    var pref = sheet.GetRow(2);
-                                    if (pref != null)
-                                    {
-                                        int cnt = 0;
-                                        int first = pref.FirstCellNum >= 0 ? pref.FirstCellNum : 0;
-                                        int last = pref.LastCellNum >= 0 ? pref.LastCellNum : first;
-                                        for (int c = first; c <= last; c++) { var cell = pref.GetCell(c); if (cell != null && !string.IsNullOrWhiteSpace(cell.ToString())) cnt++; }
-                                        if (cnt > 0) headerRowIdx = 2;
-                                    }
-                                }
-                            }
-                            catch { headerRowIdx = -1; }
-                            if (headerRowIdx < 0)
-                            {
-                                for (int r = 0; r < scanLimit; r++)
-                                {
-                                    var row = sheet.GetRow(r);
-                                    if (row == null) continue;
-                                    int cnt = 0;
-                                    int first = row.FirstCellNum >= 0 ? row.FirstCellNum : 0;
-                                    int last = row.LastCellNum >= 0 ? row.LastCellNum : first;
-                                    for (int c = first; c <= last; c++) { var cell = row.GetCell(c); if (cell != null && !string.IsNullOrWhiteSpace(cell.ToString())) cnt++; }
-                                    if (cnt > bestCount) { bestCount = cnt; headerRowIdx = r; }
-                                }
-                            }
-                            if (headerRowIdx < 0) headerRowIdx = 0;
-
-                            var headerRow = sheet.GetRow(headerRowIdx);
-                            if (headerRow == null) return resultHeaders;
-                            int maxCol = headerRow.LastCellNum >= 0 ? headerRow.LastCellNum : 0;
-
-                            for (int c = 0; c < maxCol; c++)
-                            {
-                                bool isHidden = false;
-                                try { isHidden = sheet.IsColumnHidden(c); } catch { isHidden = false; }
-                                if (!isHidden)
-                                {
-                                    try { isHidden = sheet.GetColumnWidth(c) <= 1; } catch { }
-                                }
-                                if (!isHidden) continue;
+                                IWorkbook wbN = ext == ".xlsx" ? (IWorkbook)new XSSFWorkbook(fs) : new HSSFWorkbook(fs);
+                                if (wbN == null || wbN.NumberOfSheets <= 0) return resultHeaders;
+                                ISheet? sheet = null;
                                 try
                                 {
-                                    var cell = headerRow.GetCell(c);
-                                    var hn = cell?.ToString()?.Trim();
-                                    if (!string.IsNullOrWhiteSpace(hn)) hiddenHeaders.Add(hn!);
+                                    for (int i = 0; i < wbN.NumberOfSheets; i++)
+                                    {
+                                        var nm = wbN.GetSheetName(i) ?? string.Empty;
+                                        if (string.Equals(nm.Trim(), "總表", StringComparison.OrdinalIgnoreCase)) { sheet = wbN.GetSheetAt(i); break; }
+                                    }
                                 }
-                                catch { }
+                                catch { sheet = null; }
+                                if (sheet == null) sheet = wbN.GetSheetAt(0);
+                                if (sheet == null) return resultHeaders;
+
+                                // detect header row (prefer 3rd row)
+                                swScan.Start();
+                                int headerRowIdx = -1; int bestCount = -1; int scanLimit = Math.Min(10, sheet.LastRowNum + 1);
+                                try
+                                {
+                                    if (sheet.LastRowNum >= 2)
+                                    {
+                                        var pref = sheet.GetRow(2);
+                                        if (pref != null)
+                                        {
+                                            int cnt = 0;
+                                            int first = pref.FirstCellNum >= 0 ? pref.FirstCellNum : 0;
+                                            int last = pref.LastCellNum >= 0 ? pref.LastCellNum : first;
+                                            for (int c = first; c <= last; c++) { var cell = pref.GetCell(c); if (cell != null && !string.IsNullOrWhiteSpace(cell.ToString())) cnt++; }
+                                            if (cnt > 0) headerRowIdx = 2;
+                                        }
+                                    }
+                                }
+                                catch { headerRowIdx = -1; }
+                                if (headerRowIdx < 0)
+                                {
+                                    for (int r = 0; r < scanLimit; r++)
+                                    {
+                                        var row = sheet.GetRow(r);
+                                        if (row == null) continue;
+                                        int cnt = 0;
+                                        int first = row.FirstCellNum >= 0 ? row.FirstCellNum : 0;
+                                        int last = row.LastCellNum >= 0 ? row.LastCellNum : first;
+                                        for (int c = first; c <= last; c++) { var cell = row.GetCell(c); if (cell != null && !string.IsNullOrWhiteSpace(cell.ToString())) cnt++; }
+                                        if (cnt > bestCount) { bestCount = cnt; headerRowIdx = r; }
+                                    }
+                                }
+                                if (headerRowIdx < 0) headerRowIdx = 0;
+
+                                var npoiHeaderRow2 = sheet.GetRow(headerRowIdx);
+                                if (npoiHeaderRow2 == null) return resultHeaders;
+                                int maxCol = npoiHeaderRow2.LastCellNum >= 0 ? npoiHeaderRow2.LastCellNum : 0;
+
+                                for (int c = 0; c < maxCol; c++)
+                                {
+                                    bool isHidden = false;
+                                    try { isHidden = sheet.IsColumnHidden(c); } catch { isHidden = false; }
+                                    if (!isHidden)
+                                    {
+                                        try { isHidden = sheet.GetColumnWidth(c) <= 1; } catch { }
+                                    }
+                                    if (!isHidden) continue;
+                                    try
+                                    {
+                                        var cell = npoiHeaderRow2.GetCell(c);
+                                        var hn = cell?.ToString()?.Trim();
+                                        if (!string.IsNullOrWhiteSpace(hn)) hiddenHeaders.Add(hn!);
+                                    }
+                                    catch { }
+                                }
                             }
                         }
+                        finally
+                        {
+                            try { if (!string.IsNullOrEmpty(tmpCopyPath) && File.Exists(tmpCopyPath)) File.Delete(tmpCopyPath); } catch { }
+                        }
                     }
-                    catch { hiddenHeaders.Clear(); }
+                    catch (Exception ex)
+                    {
+                        hiddenHeaders.Clear();
+                        try { _ = System.Threading.Tasks.Task.Run(() => Automatic_Storage.Utilities.Logger.LogErrorAsync($"RemoveHiddenColumnsFromDataTable: NPOI path failed for {excelPath}: {ex}")); } catch { }
+                    }
 
                     var hiddenSanSet = new HashSet<string>(hiddenHeaders.Select(Automatic_Storage.Utilities.TextParsing.SanitizeHeaderForMatch));
                     var protectedHeaders = new[] { "備註", "remark", "note", "備考", "註記" };
@@ -604,6 +874,8 @@ namespace Automatic_Storage.Utilities
                         }
                         foreach (var dc in toRemove.Distinct().ToList()) { try { uiTable.Columns.Remove(dc); } catch { } }
                         resultHeaders = hiddenHeaders.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+                        /*匯入檔案花費時間*/
+                        //try { _ = System.Threading.Tasks.Task.Run(() => Automatic_Storage.Utilities.Logger.LogInfoAsync($"RemoveHiddenColumnsFromDataTable: PathUsed=NPOI, hiddenCount={resultHeaders.Count}, elapsed={sw.ElapsedMilliseconds}ms")); } catch { }
                     }
                     else
                     {
@@ -619,56 +891,69 @@ namespace Automatic_Storage.Utilities
                     bool npoiSucceeded = false;
                     try
                     {
-                        using (var fs = File.OpenRead(excelPath))
+                        string? tmpCopyPath = null;
+                        string fileToOpen = ResolvePathOrTempCopy(excelPath, ref tmpCopyPath);
+                        try
                         {
-                            IWorkbook wbN = new XSSFWorkbook(fs);
-                            if (wbN != null && wbN.NumberOfSheets > 0)
+                            using (var fs = File.OpenRead(fileToOpen))
                             {
-                                ISheet? sheet = null;
-                                try { for (int i = 0; i < wbN.NumberOfSheets; i++) { var nm = wbN.GetSheetName(i) ?? string.Empty; if (string.Equals(nm.Trim(), "總表", StringComparison.OrdinalIgnoreCase)) { sheet = wbN.GetSheetAt(i); break; } } } catch { sheet = null; }
-                                if (sheet == null) sheet = wbN.GetSheetAt(0);
-                                if (sheet != null)
+                                IWorkbook wbN = new XSSFWorkbook(fs);
+                                if (wbN != null && wbN.NumberOfSheets > 0)
                                 {
-                                    int headerRowIdx = -1; int bestCount = -1; int scanLimit = Math.Min(10, sheet.LastRowNum + 1);
-                                    try
+                                    ISheet? sheet = null;
+                                    try { for (int i = 0; i < wbN.NumberOfSheets; i++) { var nm = wbN.GetSheetName(i) ?? string.Empty; if (string.Equals(nm.Trim(), "總表", StringComparison.OrdinalIgnoreCase)) { sheet = wbN.GetSheetAt(i); break; } } } catch { sheet = null; }
+                                    if (sheet == null) sheet = wbN.GetSheetAt(0);
+                                    if (sheet != null)
                                     {
-                                        if (sheet.LastRowNum >= 2)
+                                        int headerRowIdx = -1; int bestCount = -1; int scanLimit = Math.Min(10, sheet.LastRowNum + 1);
+                                        try
                                         {
-                                            var pref = sheet.GetRow(2);
-                                            if (pref != null)
+                                            if (sheet.LastRowNum >= 2)
                                             {
-                                                int cnt = 0; int first = pref.FirstCellNum >= 0 ? pref.FirstCellNum : 0; int last = pref.LastCellNum >= 0 ? pref.LastCellNum : first;
-                                                for (int c = first; c <= last; c++) { var cell = pref.GetCell(c); if (cell != null && !string.IsNullOrWhiteSpace(cell.ToString())) cnt++; }
-                                                if (cnt > 0) headerRowIdx = 2;
+                                                var pref = sheet.GetRow(2);
+                                                if (pref != null)
+                                                {
+                                                    int cnt = 0; int first = pref.FirstCellNum >= 0 ? pref.FirstCellNum : 0; int last = pref.LastCellNum >= 0 ? pref.LastCellNum : first;
+                                                    for (int c = first; c <= last; c++) { var cell = pref.GetCell(c); if (cell != null && !string.IsNullOrWhiteSpace(cell.ToString())) cnt++; }
+                                                    if (cnt > 0) headerRowIdx = 2;
+                                                }
                                             }
                                         }
-                                    }
-                                    catch { headerRowIdx = -1; }
-                                    if (headerRowIdx < 0)
-                                    {
-                                        for (int r = 0; r < scanLimit; r++) { var row = sheet.GetRow(r); if (row == null) continue; int cnt = 0; int first = row.FirstCellNum >= 0 ? row.FirstCellNum : 0; int last = row.LastCellNum >= 0 ? row.LastCellNum : first; for (int c = first; c <= last; c++) { var cell = row.GetCell(c); if (cell != null && !string.IsNullOrWhiteSpace(cell.ToString())) cnt++; } if (cnt > bestCount) { bestCount = cnt; headerRowIdx = r; } }
-                                    }
-                                    if (headerRowIdx < 0) headerRowIdx = 0;
-
-                                    var headerRow = sheet.GetRow(headerRowIdx);
-                                    if (headerRow != null)
-                                    {
-                                        int maxCol = headerRow.LastCellNum >= 0 ? headerRow.LastCellNum : 0;
-                                        for (int c = 0; c < maxCol; c++)
+                                        catch { headerRowIdx = -1; }
+                                        if (headerRowIdx < 0)
                                         {
-                                            bool isHidden = false;
-                                            try { isHidden = sheet.IsColumnHidden(c); } catch { isHidden = false; }
-                                            if (!isHidden) { try { isHidden = sheet.GetColumnWidth(c) <= 1; } catch { } }
-                                            if (!isHidden) continue;
-                                            try { var cell = headerRow.GetCell(c); var hn = cell?.ToString()?.Trim(); if (!string.IsNullOrWhiteSpace(hn)) hiddenHeaders.Add(hn!); } catch { }
+                                            for (int r = 0; r < scanLimit; r++) { var row = sheet.GetRow(r); if (row == null) continue; int cnt = 0; int first = row.FirstCellNum >= 0 ? row.FirstCellNum : 0; int last = row.LastCellNum >= 0 ? row.LastCellNum : first; for (int c = first; c <= last; c++) { var cell = row.GetCell(c); if (cell != null && !string.IsNullOrWhiteSpace(cell.ToString())) cnt++; } if (cnt > bestCount) { bestCount = cnt; headerRowIdx = r; } }
+                                        }
+                                        if (headerRowIdx < 0) headerRowIdx = 0;
+
+                                        var npoiHeaderRow3 = sheet.GetRow(headerRowIdx);
+                                        if (npoiHeaderRow3 != null)
+                                        {
+                                            int maxCol = npoiHeaderRow3.LastCellNum >= 0 ? npoiHeaderRow3.LastCellNum : 0;
+                                            for (int c = 0; c < maxCol; c++)
+                                            {
+                                                bool isHidden = false;
+                                                try { isHidden = sheet.IsColumnHidden(c); } catch { isHidden = false; }
+                                                if (!isHidden) { try { isHidden = sheet.GetColumnWidth(c) <= 1; } catch { } }
+                                                if (!isHidden) continue;
+                                                try { var cell = npoiHeaderRow3.GetCell(c); var hn = cell?.ToString()?.Trim(); if (!string.IsNullOrWhiteSpace(hn)) hiddenHeaders.Add(hn!); } catch { }
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
+                        finally
+                        {
+                            try { if (!string.IsNullOrEmpty(tmpCopyPath) && File.Exists(tmpCopyPath)) File.Delete(tmpCopyPath); } catch { }
+                        }
                         npoiSucceeded = true;
                     }
-                    catch { npoiSucceeded = false; }
+                    catch (Exception ex)
+                    {
+                        npoiSucceeded = false;
+                        try { _ = System.Threading.Tasks.Task.Run(() => Automatic_Storage.Utilities.Logger.LogErrorAsync($"RemoveHiddenColumnsFromDataTable: NPOI(xlsm) attempt failed for {excelPath}: {ex}")); } catch { }
+                    }
 
                     if (npoiSucceeded)
                     {
@@ -690,6 +975,8 @@ namespace Automatic_Storage.Utilities
                             }
                             foreach (var dc in toRemove.Distinct().ToList()) { try { uiTable.Columns.Remove(dc); } catch { } }
                             resultHeaders = hiddenHeaders.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+                            /*匯入檔案花費時間*/
+                            //try { _ = System.Threading.Tasks.Task.Run(() => Automatic_Storage.Utilities.Logger.LogInfoAsync($"RemoveHiddenColumnsFromDataTable: PathUsed=NPOI(xlsm), hiddenCount={resultHeaders.Count}, elapsed={sw.ElapsedMilliseconds}ms")); } catch { }
                         }
                         else resultHeaders = new List<string>();
                         return resultHeaders;
@@ -702,11 +989,17 @@ namespace Automatic_Storage.Utilities
             // COM fallback
             try
             {
+                // COM sub-phase timers to identify slow steps
+                var swComOpen = System.Diagnostics.Stopwatch.StartNew(); swComOpen.Reset();
+                var swComInspect = System.Diagnostics.Stopwatch.StartNew(); swComInspect.Reset();
+                var swComClose = System.Diagnostics.Stopwatch.StartNew(); swComClose.Reset();
+
                 Excel.Application xlApp = null; Excel.Workbook wb = null; Excel.Worksheet ws = null;
                 try
                 {
-                    xlApp = new Excel.Application { DisplayAlerts = false, Visible = false };
-                    wb = xlApp.Workbooks.Open(excelPath, ReadOnly: true);
+                    // open Excel application and workbook (measure separately)
+                    try { swComOpen.Start(); xlApp = new Excel.Application { DisplayAlerts = false, Visible = false }; wb = xlApp.Workbooks.Open(excelPath, ReadOnly: true); } catch { }
+                    try { swComOpen.Stop(); } catch { }
                     try { ws = wb.Worksheets["總表"] as Excel.Worksheet; } catch { ws = null; }
                     if (ws == null) ws = wb.Worksheets[1] as Excel.Worksheet;
                     if (ws == null) return resultHeaders;
@@ -816,7 +1109,11 @@ namespace Automatic_Storage.Utilities
                         }
                         catch { }
                     }
-                    if (hiddenHeaders.Count == 0) return resultHeaders;
+                    if (hiddenHeaders.Count == 0)
+                    {
+                        try { _ = System.Threading.Tasks.Task.Run(() => Automatic_Storage.Utilities.Logger.LogInfoAsync($"RemoveHiddenColumnsFromDataTable: PathUsed=COM(noHidden), elapsed={sw.ElapsedMilliseconds}ms, comOpen={swComOpen.ElapsedMilliseconds}ms, comInspect={swComInspect.ElapsedMilliseconds}ms")); } catch { }
+                        return resultHeaders;
+                    }
 
                     var hiddenSan = hiddenHeaders.Select(h => new { Orig = h, Norm = Automatic_Storage.Utilities.TextParsing.SanitizeHeaderForMatch(h) }).ToList();
                     var protectedHeaders2 = new[] { "備註", "remark", "note", "備考", "註記" };
@@ -857,6 +1154,7 @@ namespace Automatic_Storage.Utilities
 
                     foreach (var dc in toRemove.Distinct().ToList()) { try { uiTable.Columns.Remove(dc); } catch { } }
                     resultHeaders = hiddenHeaders.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+                    try { _ = System.Threading.Tasks.Task.Run(() => Automatic_Storage.Utilities.Logger.LogInfoAsync($"RemoveHiddenColumnsFromDataTable: PathUsed=COM, hiddenCount={resultHeaders.Count}, elapsed={sw.ElapsedMilliseconds}ms, comOpen={swComOpen.ElapsedMilliseconds}ms, comInspect={swComInspect.ElapsedMilliseconds}ms, comClose={swComClose.ElapsedMilliseconds}ms")); } catch { }
                     return resultHeaders;
                 }
                 catch { return resultHeaders; }
@@ -979,14 +1277,21 @@ namespace Automatic_Storage.Utilities
                         try { headerRange.Font.Bold = true; } catch { }
 
                         // 設定欄位內容對齊：時間靠左、料號靠左、數量靠右、操作者靠右
-                        try { recordSheet.Columns[1].HorizontalAlignment = Excel.XlHAlign.xlHAlignLeft; } catch { }
-                        try { recordSheet.Columns[2].HorizontalAlignment = Excel.XlHAlign.xlHAlignLeft; } catch { }
-                        try { recordSheet.Columns[3].HorizontalAlignment = Excel.XlHAlign.xlHAlignRight; } catch { }
-                        try { recordSheet.Columns[4].HorizontalAlignment = Excel.XlHAlign.xlHAlignRight; } catch { }
+                        try { var __c1 = recordSheet.Columns[1] as Excel.Range; if (__c1 != null) __c1.HorizontalAlignment = Excel.XlHAlign.xlHAlignLeft; } catch { }
+                        try { var __c2 = recordSheet.Columns[2] as Excel.Range; if (__c2 != null) __c2.HorizontalAlignment = Excel.XlHAlign.xlHAlignLeft; } catch { }
+                        try { var __c3 = recordSheet.Columns[3] as Excel.Range; if (__c3 != null) __c3.HorizontalAlignment = Excel.XlHAlign.xlHAlignRight; } catch { }
+                        try { var __c4 = recordSheet.Columns[4] as Excel.Range; if (__c4 != null) __c4.HorizontalAlignment = Excel.XlHAlign.xlHAlignRight; } catch { }
 
                         // 記錄工作表不需要篩選：確保未啟用 AutoFilter
                         try { var sh = recordSheet as Excel.Worksheet; if (sh != null) { try { if (sh.FilterMode) { try { sh.ShowAllData(); } catch { } } } catch { } try { sh.AutoFilterMode = false; } catch { } } } catch { }
-                        try { recordSheet.Columns[1].AutoFit(); recordSheet.Columns[2].AutoFit(); recordSheet.Columns[3].AutoFit(); recordSheet.Columns[4].AutoFit(); } catch { }
+                        try
+                        {
+                            var _c1 = recordSheet.Columns[1] as Excel.Range; if (_c1 != null) _c1.AutoFit();
+                            var _c2 = recordSheet.Columns[2] as Excel.Range; if (_c2 != null) _c2.AutoFit();
+                            var _c3 = recordSheet.Columns[3] as Excel.Range; if (_c3 != null) _c3.AutoFit();
+                            var _c4 = recordSheet.Columns[4] as Excel.Range; if (_c4 != null) _c4.AutoFit();
+                        }
+                        catch { }
                     }
                     catch { }
                 }
@@ -997,34 +1302,35 @@ namespace Automatic_Storage.Utilities
                 if (recUsed == null || (recUsed.Rows.Count == 1 && string.IsNullOrWhiteSpace(GetRangeString(recordSheet.Cells[1, 1] as Excel.Range)))) writeRow = 1;
 
                 // 批次寫入一列資料以避免多次逐格 COM 呼叫
+                try
+                {
+                    var rowArr = new object[1, 4];
+                    rowArr[0, 0] = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+                    rowArr[0, 1] = materialCode; rowArr[0, 2] = qty; rowArr[0, 3] = (operatorName ?? string.Empty);
+                    var rStart = recordSheet.Cells[writeRow, 1] as Excel.Range;
+                    var rEnd = recordSheet.Cells[writeRow, 4] as Excel.Range;
+                    Excel.Range writeRange = null;
+                    try { if (rStart != null && rEnd != null) writeRange = recordSheet.Range[rStart, rEnd]; } catch { }
+                    // 解除保護 -> 設定第4欄為文字格式 -> 批次寫入；若失敗則逐格寫入並確保操作者為文字
+                    try { try { recordSheet.Unprotect(excelPassword); } catch { } } catch { }
+                    try { var __tmpc = recordSheet.Columns[4] as Excel.Range; if (__tmpc != null) { try { __tmpc.NumberFormat = "@"; } catch { } try { ReleaseComObjectSafe(__tmpc); } catch { } } } catch { }
+                    try { var __tmpcell = recordSheet.Cells[writeRow, 4] as Excel.Range; if (__tmpcell != null) { try { __tmpcell.NumberFormat = "@"; } catch { } try { ReleaseComObjectSafe(__tmpcell); } catch { } } } catch { }
                     try
                     {
-                        var rowArr = new object[1, 4];
-                        rowArr[0, 0] = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
-                        rowArr[0, 1] = materialCode; rowArr[0, 2] = qty; rowArr[0, 3] = (operatorName ?? string.Empty);
-                        var rStart = recordSheet.Cells[writeRow, 1] as Excel.Range;
-                        var rEnd = recordSheet.Cells[writeRow, 4] as Excel.Range;
-                        Excel.Range writeRange = null;
-                        try { if (rStart != null && rEnd != null) writeRange = recordSheet.Range[rStart, rEnd]; } catch { }
-                        // 解除保護 -> 設定第4欄為文字格式 -> 批次寫入；若失敗則逐格寫入並確保操作者為文字
-                        try { try { recordSheet.Unprotect(excelPassword); } catch { } } catch { }
-                        try { (recordSheet.Columns[4] as Excel.Range).NumberFormat = "@"; } catch { }
-                        try { (recordSheet.Cells[writeRow, 4] as Excel.Range).NumberFormat = "@"; } catch { }
+                        if (writeRange != null) writeRange.Value2 = rowArr;
+                        // ensure the operator cell is explicitly set to Text and re-written per-cell
                         try
                         {
-                            if (writeRange != null) writeRange.Value2 = rowArr;
-                            // ensure the operator cell is explicitly set to Text and re-written per-cell
-                            try
+                            var opCell = recordSheet.Cells[writeRow, 4] as Excel.Range;
+                            if (opCell != null)
                             {
-                                var opCell = recordSheet.Cells[writeRow, 4] as Excel.Range;
-                                if (opCell != null)
-                                {
-                                    try { opCell.NumberFormat = "@"; } catch { }
-                                    try { opCell.Value2 = operatorName; } catch { }
-                                }
+                                try { opCell.NumberFormat = "@"; } catch { }
+                                try { opCell.Value2 = operatorName; } catch { }
+                                try { ReleaseComObjectSafe(opCell); } catch { }
                             }
-                            catch { }
                         }
+                        catch { }
+                    }
                     catch
                     {
                         try { recordSheet.Cells[writeRow, 1] = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"); } catch { }
@@ -1037,6 +1343,7 @@ namespace Automatic_Storage.Utilities
                             {
                                 try { opCell.NumberFormat = "@"; } catch { }
                                 try { opCell.Value2 = "'" + (operatorName ?? string.Empty); } catch { }
+                                try { ReleaseComObjectSafe(opCell); } catch { }
                             }
                             else
                             {
@@ -1044,6 +1351,13 @@ namespace Automatic_Storage.Utilities
                             }
                         }
                         catch { }
+                    }
+                    finally
+                    {
+                        try { if (writeRange != null) ReleaseComObjectSafe(writeRange); } catch { }
+                        try { if (rStart != null) ReleaseComObjectSafe(rStart); } catch { }
+                        try { if (rEnd != null) ReleaseComObjectSafe(rEnd); } catch { }
+                        try { if (recUsed != null) ReleaseComObjectSafe(recUsed); } catch { }
                     }
                 }
                 catch
@@ -1053,7 +1367,14 @@ namespace Automatic_Storage.Utilities
                     try { recordSheet.Cells[writeRow, 3] = qty; } catch { }
                     try { var opCell2 = recordSheet.Cells[writeRow, 4] as Excel.Range; if (opCell2 != null) { try { opCell2.NumberFormat = "@"; } catch { } try { opCell2.Value2 = "'" + (operatorName ?? string.Empty); } catch { } } else { recordSheet.Cells[writeRow, 4] = "'" + (operatorName ?? string.Empty); } } catch { }
                 }
-                try { recordSheet.Columns[1].AutoFit(); recordSheet.Columns[2].AutoFit(); recordSheet.Columns[3].AutoFit(); recordSheet.Columns[4].AutoFit(); } catch { }
+                try
+                {
+                    var _c1 = recordSheet.Columns[1] as Excel.Range; if (_c1 != null) _c1.AutoFit();
+                    var _c2 = recordSheet.Columns[2] as Excel.Range; if (_c2 != null) _c2.AutoFit();
+                    var _c3 = recordSheet.Columns[3] as Excel.Range; if (_c3 != null) _c3.AutoFit();
+                    var _c4 = recordSheet.Columns[4] as Excel.Range; if (_c4 != null) _c4.AutoFit();
+                }
+                catch { }
 
                 // 在回寫後，針對主表設定欄位鎖定並保護（同 ProtectWorksheet 行為）
                 try
@@ -1280,7 +1601,20 @@ namespace Automatic_Storage.Utilities
         private static string GetRangeString(Excel.Range rng)
         {
             if (rng == null) return string.Empty;
-            try { var v = rng.Value2; if (v == null) return string.Empty; return v.ToString(); } catch { return string.Empty; }
+            try
+            {
+                var v = rng.Value2;
+                var res = v == null ? string.Empty : v.ToString();
+                return res;
+            }
+            catch
+            {
+                return string.Empty;
+            }
+            finally
+            {
+                try { ReleaseComObjectSafe(rng); } catch { }
+            }
         }
 
         /// <summary>
@@ -1290,7 +1624,30 @@ namespace Automatic_Storage.Utilities
         /// <param name="rng">要釋放的 Range 參考，釋放後設為 null。</param>
         private static void TryReleaseRange(ref Excel.Range rng)
         {
-            try { if (rng != null) { Marshal.ReleaseComObject(rng); rng = null; } } catch { rng = null; }
+            try
+            {
+                if (rng != null)
+                {
+                    try
+                    {
+                        // 使用集中式的安全釋放，loop 直到引用計數為 0
+                        ReleaseComObjectSafe(rng);
+                    }
+                    catch (Exception ex)
+                    {
+                        try { System.Diagnostics.Debug.WriteLine($"TryReleaseRange error: {ex}"); } catch { }
+                        try { _ = System.Threading.Tasks.Task.Run(() => Automatic_Storage.Utilities.Logger.LogErrorAsync($"TryReleaseRange error: {ex.Message}")); } catch { }
+                    }
+                    finally
+                    {
+                        rng = null;
+                    }
+                }
+            }
+            catch
+            {
+                rng = null;
+            }
         }
 
         /// <summary>
@@ -1300,7 +1657,29 @@ namespace Automatic_Storage.Utilities
         /// <param name="ws">要釋放的 Worksheet 參考，釋放後設為 null。</param>
         private static void TryReleaseWorksheet(ref Excel.Worksheet ws)
         {
-            try { if (ws != null) { Marshal.ReleaseComObject(ws); ws = null; } } catch { ws = null; }
+            try
+            {
+                if (ws != null)
+                {
+                    try
+                    {
+                        ReleaseComObjectSafe(ws);
+                    }
+                    catch (Exception ex)
+                    {
+                        try { System.Diagnostics.Debug.WriteLine($"TryReleaseWorksheet error: {ex}"); } catch { }
+                        try { _ = System.Threading.Tasks.Task.Run(() => Automatic_Storage.Utilities.Logger.LogErrorAsync($"TryReleaseWorksheet error: {ex.Message}")); } catch { }
+                    }
+                    finally
+                    {
+                        ws = null;
+                    }
+                }
+            }
+            catch
+            {
+                ws = null;
+            }
         }
 
         /// <summary>
@@ -1310,7 +1689,30 @@ namespace Automatic_Storage.Utilities
         /// <param name="wb">要釋放的 Workbook 參考，釋放後設為 null。</param>
         private static void TryReleaseWorkbook(ref Excel.Workbook wb)
         {
-            try { if (wb != null) { wb.Close(false); Marshal.ReleaseComObject(wb); wb = null; } } catch { wb = null; }
+            try
+            {
+                if (wb != null)
+                {
+                    try
+                    {
+                        try { wb.Close(false); } catch { }
+                        ReleaseComObjectSafe(wb);
+                    }
+                    catch (Exception ex)
+                    {
+                        try { System.Diagnostics.Debug.WriteLine($"TryReleaseWorkbook error: {ex}"); } catch { }
+                        try { _ = System.Threading.Tasks.Task.Run(() => Automatic_Storage.Utilities.Logger.LogErrorAsync($"TryReleaseWorkbook error: {ex.Message}")); } catch { }
+                    }
+                    finally
+                    {
+                        wb = null;
+                    }
+                }
+            }
+            catch
+            {
+                wb = null;
+            }
         }
 
         /// <summary>
@@ -1320,7 +1722,32 @@ namespace Automatic_Storage.Utilities
         /// <param name="app">要釋放的 Application 參考，釋放後設為 null。</param>
         private static void TryReleaseApplication(ref Excel.Application app)
         {
-            try { if (app != null) { app.Quit(); Marshal.ReleaseComObject(app); app = null; } } catch { app = null; }
+            try
+            {
+                if (app != null)
+                {
+                    try
+                    {
+                        try { app.Quit(); } catch { }
+                        ReleaseComObjectSafe(app);
+                    }
+                    catch (Exception ex)
+                    {
+                        try { System.Diagnostics.Debug.WriteLine($"TryReleaseApplication error: {ex}"); } catch { }
+                        try { _ = System.Threading.Tasks.Task.Run(() => Automatic_Storage.Utilities.Logger.LogErrorAsync($"TryReleaseApplication error: {ex.Message}")); } catch { }
+                    }
+                    finally
+                    {
+                        app = null;
+                    }
+                }
+            }
+            catch
+            {
+                app = null;
+            }
         }
     }
 }
+
+
