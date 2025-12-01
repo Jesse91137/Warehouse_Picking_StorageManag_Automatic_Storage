@@ -22,20 +22,46 @@ namespace Automatic_Storage.Utilities
             {
                 if (comObj == null) return;
                 if (!Marshal.IsComObject(comObj)) return;
-                try
+                // 在 Windows 上，儘量以 ReleaseComObject 反覆降低 RCW 的參考計數。
+                // 若 ReleaseComObject 遇到例外或未能完全釋放，嘗試使用 FinalReleaseComObject 作為 fallback。
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
                 {
-                    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                    try
                     {
-                        try { while (Marshal.ReleaseComObject(comObj) > 0) { } } catch { }
+                        // 先嘗試以 ReleaseComObject 逐一釋放
+                        try
+                        {
+                            while (Marshal.ReleaseComObject(comObj) > 0) { }
+                        }
+                        catch
+                        {
+                            // 若上面失敗，嘗試使用 FinalReleaseComObject
+                            try { Marshal.FinalReleaseComObject(comObj); } catch { }
+                        }
+                    }
+                    catch { }
+                    finally
+                    {
+                        // 進行多輪 GC 與等待，增加 CLR 與 COM 釋放機會
+                        try { comObj = null; } catch { }
+                        try
+                        {
+                            for (int i = 0; i < 3; i++)
+                            {
+                                GC.Collect();
+                                GC.WaitForPendingFinalizers();
+                                Thread.Sleep(50);
+                            }
+                        }
+                        catch { }
                     }
                 }
-                catch { }
-                finally
+                else
                 {
-                    comObj = null;
-                    GC.Collect();
-                    GC.WaitForPendingFinalizers();
-                    GC.Collect();
+                    // 非 Windows 平台直接嘗試釋放並做 GC 保險措施
+                    try { Marshal.FinalReleaseComObject(comObj); } catch { }
+                    try { comObj = null; } catch { }
+                    try { GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect(); } catch { }
                 }
             }
             catch { }
